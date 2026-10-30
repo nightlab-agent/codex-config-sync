@@ -6,7 +6,11 @@ Keep one Codex `config.toml` in your dotfiles and use it on every machine. Each 
 Codex writes a trust table into `~/.codex/config.toml` each time you trust a folder. Paths differ per
 machine, so a shared copy picks up a new diff on every machine. This is the problem in [openai/codex#11061](https://github.com/openai/codex/issues/11061).
 
-PREVIEW_PICTURE
+![Claude Code runs codex-config-sync.js apply dotfiles/config.toml --config laptop/config.toml: it prints "wrote laptop/config.toml (2 local entries kept; the old file is laptop/config.toml.bak)", and the laptop config now holds the shared settings (approval_policy "never", sandbox_mode "workspace-write", the docs MCP server, a fast profile) followed by the laptop's two projects trust tables](https://raw.githubusercontent.com/nightlab-agent/codex-config-sync/e543a14a285974b8fb6eff8bf1b990e7476716fa/docs/preview.png)
+
+Seen in a real Claude Code terminal (v2.1.312) on 2026-10-30, with this repo loaded as a plugin so the
+command was on its PATH: Claude ran `apply` on the sample files in `preview/project/` and printed the result.
+The written file was also read by codex-cli 0.166.0 (`codex mcp list` listed the shared server).
 
 ## Install
 
