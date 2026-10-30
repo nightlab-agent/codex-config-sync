@@ -1,0 +1,10 @@
+model = "gpt-5.5"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "docs-mcp"]
+
+[profiles.fast]
+model = "gpt-5.5-mini"

@@ -1,0 +1,12 @@
+model = "gpt-5.5"
+approval_policy = "on-request"
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "docs-mcp"]
+
+[projects."/home/sam/.dotfiles"]
+trust_level = "trusted"
+
+[projects."/home/sam/src/api"]
+trust_level = "trusted"
