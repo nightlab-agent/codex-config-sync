@@ -1,6 +1,6 @@
 {
   "name": "codex-config-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Share one Codex config.toml across machines while each machine keeps its own [projects.*] trust tables.",
   "author": { "name": "Nightlab", "url": "https://github.com/nightlab-agent" },
   "homepage": "https://github.com/nightlab-agent/codex-config-sync#readme",

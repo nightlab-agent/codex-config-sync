@@ -67,16 +67,17 @@ are never parsed or rewritten: each table is moved whole, with the comment lines
 The written file is, in order: the shared file's settings above its first table, this machine's trust
 entries written as dotted keys above the first table (such as `projects."/x".trust_level = ...`), the
 shared tables, then this machine's trust tables. If Codex saves a trust choice while `apply` runs, `apply`
-reads the file again and starts over (three tries), so the new table is kept.
+reads the file again and starts over (three tries), so the new table is kept. The last check runs just before
+the rename, so only a save inside that last instant can still be lost; Codex has no lock this tool could take.
 
 ## What it does not do
 
 - It does not copy files between machines. Use git, your dotfiles manager, or a synced folder for the shared file.
-- It does not touch `auth.json`, sessions or history. It writes only `config.toml`, `config.toml.bak` and the
-  file you name with `-o`.
+- It does not touch `auth.json`, sessions or history. It writes only `config.toml`, `config.toml.bak`, the
+  file you name with `-o` and that file's `.bak` copy when it already existed.
 - Trust tables inside the shared file are ignored (it says how many). Trust stays per machine.
 - It refuses, and writes nothing, when a file has a string or bracket it cannot follow, when the result would
-  define a table twice, or when `config.toml` is a symlink. Replace the link with a plain file, then run `apply`.
+  define a table twice (two `[x]` headers, or `x.y = 1` above the first table with a later `[x]`), or when `config.toml` is a symlink. Replace the link with a plain file, then run `apply`.
 - It is not a full TOML validator. It checks only what it needs to split the file safely.
 - If Codex later keeps trust in a separate file, you will not need this tool for trust tables.
 
