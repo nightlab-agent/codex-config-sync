@@ -22,6 +22,24 @@ Options:
 
 class SplitError extends Error {}
 
+const ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', e: '\x1b', '"': '"', '\\': '\\' };
+const HEX_DIGITS = { u: 4, U: 8, x: 2 };
+
+// The text of a basic-string key. An escape it cannot read is refused: a key whose name is
+// unknown cannot be sorted into shared or machine-local.
+function unescapeKey(raw, lineNo) {
+  return raw.replace(/\\(?:([uUx])([0-9A-Fa-f]*)|([^]?))/g, (all, kind, hex, one) => {
+    if (kind) {
+      const n = HEX_DIGITS[kind];
+      const code = parseInt(hex.slice(0, n), 16);
+      if (hex.length < n || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new SplitError(`line ${lineNo}: cannot read the escape ${all} in a key`);
+      return String.fromCodePoint(code) + hex.slice(n);
+    }
+    if (!(one in ESCAPES)) throw new SplitError(`line ${lineNo}: cannot read the escape ${all} in a key`);
+    return ESCAPES[one];
+  });
+}
+
 // Reads one TOML key path (dotted, bare or quoted) from s at i. Returns { keys, end }.
 function readKeyPath(s, i, lineNo) {
   const keys = [];
@@ -34,7 +52,7 @@ function readKeyPath(s, i, lineNo) {
         if (s[j] === '\\') { out += s.slice(j, j + 2); j += 2; } else out += s[j++];
       }
       if (j >= s.length) throw new SplitError(`line ${lineNo}: unterminated quoted key`);
-      try { key = JSON.parse('"' + out + '"'); } catch { key = out; }
+      key = unescapeKey(out, lineNo);
       i = j + 1;
     } else if (s[i] === "'") {
       const j = s.indexOf("'", i + 1);
@@ -167,9 +185,10 @@ function trimBlank(lines) {
 // The shareable lines and the local blocks of a parsed file.
 function partition(doc, keep) {
   const sharedRoot = [], localRoot = [], sharedTables = [], localTables = [];
+  const localStmts = doc.root.filter((s) => isLocal(s.keys, keep));
   for (const s of doc.root) (isLocal(s.keys, keep) ? localRoot : sharedRoot).push(...s.lines);
   for (const tb of doc.tables) (isLocal(tb.keys, keep) ? localTables : sharedTables).push(tb);
-  return { sharedRoot, localRoot, sharedTables, localTables };
+  return { sharedRoot, localRoot, sharedTables, localTables, localStmts };
 }
 
 function shareable(doc, keep) {
@@ -184,6 +203,7 @@ function shareable(doc, keep) {
 }
 
 function headerId(tb) { return (tb.array ? '[[' : '[') + JSON.stringify(tb.keys); }
+const isUnder = (keys, parent) => parent.every((k, i) => keys[i] === k);
 
 // The merged file: the shared root, the live file's local root statements, the shared
 // tables, then the live file's local tables.
@@ -193,17 +213,27 @@ function merge(sharedDoc, liveDoc, keep) {
   const out = trimBlank(s.sharedRoot);
   if (l.localRoot.length) out.push(...trimBlank(l.localRoot));
   const tables = [...s.sharedTables, ...l.localTables];
-  const seen = new Set();
+  const seen = new Map();
+  for (const st of [...sharedDoc.root, ...l.localStmts]) {
+    if (!st.keys || (isLocal(st.keys, keep) && !l.localStmts.includes(st))) continue;
+    for (let n = 1; n < st.keys.length; n++) {
+      const parent = st.keys.slice(0, n);
+      seen.set(headerId({ keys: parent }), parent);
+    }
+  }
   for (const tb of tables) {
-    if (!tb.array) {
+    if (tb.array) {
+      // a new array element starts its child tables afresh
+      for (const [id, keys] of seen) if (isUnder(keys, tb.keys)) seen.delete(id);
+    } else {
       const id = headerId(tb);
       if (seen.has(id)) throw new SplitError(`the merged file would define [${tb.keys.join('.')}] twice`);
-      seen.add(id);
+      seen.set(id, tb.keys);
     }
     if (out.length) out.push('');
     out.push(...trimBlank(tb.lines));
   }
-  return { lines: out, ignored: s.localRoot.filter((x) => x.trim() && !x.trim().startsWith('#')).length + s.localTables.length, kept: l.localTables.length + l.localRoot.filter((x) => x.trim() && !x.trim().startsWith('#')).length };
+  return { lines: out, ignored: s.localStmts.length + s.localTables.length, kept: l.localStmts.length + l.localTables.length };
 }
 
 function modeOf(file) {
@@ -346,6 +376,6 @@ module.exports = { split, shareable, merge, SplitError };
 
 if (require.main === module) {
   try { process.exitCode = main(process.argv.slice(2)); } catch (e) {
-    if (e instanceof SplitError) { console.error(`codex-config-sync: ${e.message}`); process.exitCode = 2; } else throw e;
+    if (e instanceof SplitError || e.code) { console.error(`codex-config-sync: ${e.message}`); process.exitCode = 2; } else throw e;
   }
 }
