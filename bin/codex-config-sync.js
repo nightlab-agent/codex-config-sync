@@ -206,13 +206,40 @@ function merge(sharedDoc, liveDoc, keep) {
   return { lines: out, ignored: s.localRoot.filter((x) => x.trim() && !x.trim().startsWith('#')).length + s.localTables.length, kept: l.localTables.length + l.localRoot.filter((x) => x.trim() && !x.trim().startsWith('#')).length };
 }
 
-function writeAtomic(file, text) {
-  try { file = fs.realpathSync(file); } catch {} // a symlinked target is written where it points
-  let mode = 0o600;
-  try { mode = fs.statSync(file).mode & 0o777; } catch {}
+function modeOf(file) {
+  try { return fs.statSync(file).mode & 0o777; } catch { return 0o600; }
+}
+
+// Follows a chain of links, dangling ones too, to the file a write should land on.
+function linkTarget(file) {
+  for (let n = 0; n < 40; n++) {
+    let to;
+    try { to = fs.readlinkSync(file); } catch { return file; }
+    file = path.resolve(path.dirname(file), to);
+  }
+  throw new SplitError(`${file}: too many links`);
+}
+
+// Writes by rename, so a link at `file` is replaced, never followed, and the file has exactly
+// `mode`. `stillSafe`, when given, runs last: false leaves `file` alone and returns false.
+function replaceFile(file, text, mode, stillSafe) {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, text, { mode });
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, text, { mode, flag: 'wx' });
+  if (stillSafe && !stillSafe()) { fs.rmSync(tmp, { force: true }); return false; }
   fs.renameSync(tmp, file);
+  return true;
+}
+
+// extract's output: a link is written where it points, and an old file is kept as FILE.bak.
+function writeOutput(file, text) {
+  const target = linkTarget(file);
+  const mode = modeOf(target);
+  let old = null;
+  try { old = fs.readFileSync(target); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (old !== null) replaceFile(target + '.bak', old, mode);
+  replaceFile(target, text, mode);
+  return old !== null;
 }
 
 function readDoc(file, what) {
@@ -255,7 +282,10 @@ function main(argv) {
     const live = readDoc(config, 'live config');
     if (!live) throw new SplitError(`no live config at ${config}`);
     const text = shareable(live, keep).join(live.eol) + live.eol;
-    if (args.out) { writeAtomic(args.out, text); console.error(`wrote ${args.out}`); } else process.stdout.write(text);
+    if (args.out) {
+      const backedUp = writeOutput(args.out, text);
+      console.error(`wrote ${args.out}${backedUp ? `; the old file is ${linkTarget(args.out)}.bak` : ''}`);
+    } else process.stdout.write(text);
     return 0;
   }
   if (cmd !== 'apply' && cmd !== 'check') throw new SplitError(`unknown command ${cmd}`);
@@ -294,15 +324,19 @@ function main(argv) {
     const kept = `${m.kept} local entr${m.kept === 1 ? 'y' : 'ies'} kept`;
     if (before === text) { console.log(`already in sync (${kept})`); return 0; }
     fs.mkdirSync(path.dirname(config), { recursive: true });
-    let now = null;
-    try { now = fs.readFileSync(config, 'utf8'); } catch {}
-    if (now !== before) {
+    const unchanged = () => {
+      let now = null;
+      try { now = fs.readFileSync(config, 'utf8'); } catch {}
+      return now === before;
+    };
+    const again = () => {
       if (attempt === 3) throw new SplitError(`${config} kept changing while apply ran; nothing written, run apply again`);
       live = readDoc(config, 'live config') || split('');
-      continue;
-    }
-    if (before !== null) fs.writeFileSync(config + '.bak', before, { mode: fs.statSync(config).mode & 0o777 });
-    writeAtomic(config, text);
+    };
+    if (!unchanged()) { again(); continue; }
+    const mode = modeOf(config);
+    if (before !== null) replaceFile(config + '.bak', before, mode);
+    if (!replaceFile(config, text, mode, unchanged)) { again(); continue; }
     console.log(`wrote ${config} (${kept}${before !== null ? `; the old file is ${config}.bak` : ''})`);
     return 0;
   }
