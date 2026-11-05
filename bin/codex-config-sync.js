@@ -104,8 +104,8 @@ function deadPid(pid) {
 
 function claimPrefix(lock) { return `${lock}.reap-${Buffer.from(os.hostname()).toString('hex')}-`; }
 
-// Claims have unique names and identify the reclaimer's host and pid, even if it
-// died after removing the original lock. A live or reused pid leaves its claim alone.
+// Recovery links have unique names and identify the recovering process's host and pid,
+// even if it died after removing the lock. A live or reused pid leaves its link alone.
 function cleanClaims(lock) {
   const prefix = path.basename(claimPrefix(lock));
   for (const name of fs.readdirSync(path.dirname(lock))) {
@@ -118,7 +118,7 @@ function cleanClaims(lock) {
   }
 }
 
-// Keep the old inode open throughout recovery. A private hard link elects a reclaimer:
+// Keep the old inode open throughout recovery. A private hard link selects one process:
 // only the original name plus our link (nlink == 2) permits unlinking the original.
 // A rival keeps its link until its check finishes, so it cannot also pass that check.
 function recoverLock(lock) {
@@ -144,29 +144,42 @@ function recoverLock(lock) {
       if (isOld(now) && isOld(fs.lstatSync(claim)) && now.nlink === 2) fs.unlinkSync(lock);
     } finally { fs.unlinkSync(claim); }
     return holder;
+  } catch (e) {
+    // drvfs can lose even an open descriptor when the holder removes the lock.
+    if (e.code === 'ENOENT') return 'holder changed';
+    throw e;
   } finally { fs.closeSync(fd); }
+}
+
+function lockRemedy(lock) {
+  return `Check that no apply is still running on any host using this config. Only then remove ${lock} and run apply again.`;
 }
 
 function lockConfig(config) {
   const lock = config + '.lock';
-  fs.mkdirSync(path.dirname(config), { recursive: true });
-  const pause = new Int32Array(new SharedArrayBuffer(4));
-  let holder;
-  for (let n = 0; n <= 10; n++) {
-    let fd;
-    try { fd = fs.openSync(lock, 'wx', 0o600); } catch (e) { if (e.code !== 'EEXIST') throw e; }
-    if (fd !== undefined) {
-      try {
-        try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname() }) + '\n'); }
-        finally { fs.closeSync(fd); }
-        cleanClaims(lock);
-      } catch (e) { fs.unlinkSync(lock); throw e; }
-      return () => fs.unlinkSync(lock);
+  try {
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    let holder;
+    for (let n = 0; n <= 10; n++) {
+      let fd;
+      try { fd = fs.openSync(lock, 'wx', 0o600); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+      if (fd !== undefined) {
+        try {
+          try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname() }) + '\n'); }
+          finally { fs.closeSync(fd); }
+          cleanClaims(lock);
+        } catch (e) { fs.unlinkSync(lock); throw e; }
+        return () => fs.unlinkSync(lock);
+      }
+      holder = recoverLock(lock);
+      if (n < 10) Atomics.wait(pause, 0, 0, 50);
     }
-    holder = recoverLock(lock);
-    if (n < 10) Atomics.wait(pause, 0, 0, 50);
+    throw new SplitError(`${lock}: lock busy after waiting 500 ms; holder: ${holder}; nothing written. ${lockRemedy(lock)}`);
+  } catch (e) {
+    if (e instanceof SplitError) throw e;
+    throw new SplitError(`${lock}: ${e.message}. Check folder permissions and filesystem support for exclusive create and hard links. If the lock remains: ${lockRemedy(lock)}`);
   }
-  throw new SplitError(`${lock}: lock busy after waiting 500 ms; holder: ${holder}; nothing written. Check that no apply is still running on any host using this config. Only then remove ${lock} and run apply again.`);
 }
 
 function main(argv) {
@@ -205,6 +218,13 @@ function main(argv) {
   // Refuse a missing shared file before creating the config folder or lock; contents
   // are still read under the lock, since the shared file may be the live config.
   if (!fs.statSync(shared, { throwIfNoEntry: false })) throw new SplitError(`no shared file at ${shared}`);
+  if (cmd === 'apply' && !args.dry && !fs.statSync(path.dirname(config), { throwIfNoEntry: false })) {
+    // With no config folder, validate against an empty live file before creating anything.
+    // Re-read under the lock below: another apply may create the folder and config meanwhile.
+    const doc = readDoc(shared, 'shared file');
+    if (!doc) throw new SplitError(`no shared file at ${shared}`);
+    split(merge(doc, split(''), keep).lines.join(doc.eol) + doc.eol);
+  }
   const unlock = cmd === 'apply' && !args.dry ? lockConfig(config) : () => {};
   try {
     const sharedDoc = readDoc(shared, 'shared file');

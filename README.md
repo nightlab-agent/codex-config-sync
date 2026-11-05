@@ -40,7 +40,8 @@ codex-config-sync apply ~/.dotfiles/codex/config.toml
 `~/.codex/config.toml` and adds back this machine's trust tables. Every other setting on this machine is
 replaced by the shared one, including settings the shared file does not have; run `check` first to see them,
 and use `--keep` for a table that should stay per machine. The old file is kept as `config.toml.bak` (one copy:
-the next `apply` that changes something overwrites it). Running `apply` again when nothing changed writes nothing.
+the next `apply` that changes something overwrites it). Running `apply` again when nothing changed leaves the
+config and backup alone, but still creates and removes a lock. It needs a writable config folder even when in sync.
 
 To see whether a machine has drifted (for a script or a shell startup line):
 
@@ -68,25 +69,28 @@ The written file is, in order: the shared file's settings above its first table,
 entries written as dotted keys above the first table (such as `projects."/x".trust_level = ...`), the
 shared tables, then this machine's trust tables.
 
-After checking that the shared file exists, `apply` exclusively creates `config.toml.lock` beside the live
-config before reading either file's contents and holds it through the merge, backup and rename.
-Another apply waits in 50 ms steps (500 ms total), then refuses with exit 2
-naming the lock file and its holder's PID and hostname; it leaves the config and backup alone. Every normal
+Before creating a missing config folder, `apply` validates the shared file and its result with no live config.
+It then exclusively creates `config.toml.lock` beside the live config before reading both files for the merge,
+and holds it through the backup and rename.
+When the lock is busy, another apply waits in 50 ms steps (500 ms total), then refuses with exit 2,
+naming the lock file and its holder's PID and hostname when known. Errors reading or recovering a lock
+refuse with the cause and recovery steps. These refusals leave the config and backup alone. Every normal
 exit removes the run's own lock, including when already in sync or refusing a malformed config. `--dry-run`,
 `extract` and `check` take no lock.
 
-A lock from a dead PID on the same hostname is recovered automatically. Competing reclaimers use hard
+A lock from a dead PID on the same hostname is recovered automatically. Processes recovering a lock use hard
 links to avoid removing a new owner's lock. A live PID is never taken over, even if it was reused;
 foreign hosts and incomplete lock records are refused. This needs a filesystem that honors exclusive create,
 and recovery needs reliable hard links and inode/link counts. Network home folders are untested; automatic
 recovery assumes unique hostnames and a shared local PID namespace.
-The refusal tells you how to recover manually: check that no apply is still running on any host using
+A lock refusal tells you how to recover manually: check that no apply is still running on any host using
 this config. Only then remove the named lock file and run `apply` again. An incomplete record may be
 left by an interrupted lock write; waiting alone will not repair it.
 
 If Codex saves a trust choice while `apply` runs, `apply`
 reads the file again and starts over (three tries), so the new table is kept. The last check runs just before
 the backup and config renames, so a save after that check can still be lost; Codex does not honor this tool's lock.
+A power loss can still lose the config or backup, even after a successful apply; writes are not forced to disk.
 
 ## What it does not do
 
@@ -95,11 +99,13 @@ the backup and config renames, so a save after that check can still be lost; Cod
   `config.toml.lock` (and `config.toml.lock.reap-<host>-<pid>-<id>` hard links during recovery), the
   file you name with `-o` and that file's `.bak` copy when it already existed (when that file is a link, the
   write and the `.bak` land beside the file it points to). A run killed mid-write can leave a
-  `.config.toml.<pid>.tmp` beside the file; it is safe to delete. It can also leave a lock or recovery link;
+  `.config.toml.<pid>.tmp` or `.config.toml.bak.<pid>.tmp` beside the file; these are safe to delete.
+  It can also leave a lock or recovery link;
   retrying apply recovers identifiable dead local holders. Inspect uncertain ownership before removing a lock
   by hand, and never remove one while an apply may still be running.
 - Trust tables inside the shared file are ignored (it says how many). Trust stays per machine.
-- It refuses, and writes nothing, when a file has a string or bracket it cannot follow, when the result would
+- It refuses without replacing the config or backup when a file has a string or bracket it cannot follow,
+  when the result would
   define a table twice (two `[x]` headers, or `x.y = 1` above the first table with a later `[x]`), or when `config.toml` is a symlink. Replace the link with a plain file, then run `apply`.
 - `extract -o` refuses to write over the live config, or to keep its backup there, by its name or through a link, so a `config.toml` that links into your dotfiles needs another output file.
 - It is not a full TOML validator. It checks only what it needs to split the file safely.

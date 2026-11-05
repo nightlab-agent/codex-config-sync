@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 
 const BIN = path.join(__dirname, '..', 'bin', 'codex-config-sync.js');
 const PRELOAD = path.join(__dirname, 'review-overlap-peer.js');
@@ -17,12 +17,15 @@ const PROFILE_OLD = '[profiles.fast]\nmodel = "profile-old"';
 const PROFILE_NEW = '[profiles.fast]\nmodel = "profile-new"';
 const LIVE = ROOT + '\n' + [MCP_OLD, PROFILE_OLD, TRUST].join('\n\n') + '\n';
 let passed = 0, failed = 0;
+let chain = Promise.resolve();
 
 function test(name, fn) {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ccs-overlap-'));
-  try { fn(d); passed++; console.log(`ok   ${name}`); }
-  catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
-  finally { fs.rmSync(d, { recursive: true, force: true }); }
+  chain = chain.then(async () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ccs-overlap-'));
+    try { await fn(d); passed++; console.log(`ok   ${name}`); }
+    catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
+    finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
 }
 function files(d) {
   const cfg = path.join(d, 'config.toml');
@@ -50,6 +53,10 @@ function contains(text, mcp, profile) {
   assert.strictEqual((text.match(/\[projects\."\/work"\]/g) || []).length, 1);
 }
 function success(r) { assert.strictEqual(r.code, 0, r.err); }
+function remedy(r, cfg) {
+  assert.match(r.err, /check that no apply is still running on any host/i, 'refusal must explain what to check');
+  assert.ok(r.err.includes(`Only then remove ${cfg}.lock and run apply again`), r.err);
+}
 function noLock(cfg) {
   assert.deepStrictEqual(fs.readdirSync(path.dirname(cfg)).filter((f) => f.startsWith(path.basename(cfg) + '.lock')), []);
 }
@@ -154,6 +161,45 @@ test('CMP a lock from a provably dead local pid is recovered without a manual st
   contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
   noLock(f.cfg);
 });
+test('BUG fstat ENOENT after a holder removes its lock retries acquisition', (d) => {
+  const f = files(d);
+  putLock(f.cfg, deadPid());
+  success(run(f.mcp, { LOCK_CONFIG: f.cfg, LOCK_STAGE: 'stat-gone' }, ['-r', LOCK_PRELOAD]));
+  contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
+  assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), LIVE);
+  noLock(f.cfg);
+});
+test('BUG other fstat errors refuse with a recovery step and keep the lock', (d) => {
+  const f = files(d);
+  putLock(f.cfg, deadPid());
+  const lock = fs.readFileSync(f.cfg + '.lock', 'utf8');
+  const r = run(f.mcp, { LOCK_CONFIG: f.cfg, LOCK_STAGE: 'stat-error' }, ['-r', LOCK_PRELOAD]);
+  assert.strictEqual(r.code, 2, r.err);
+  assert.match(r.err, /injected recovery fstat failure/);
+  remedy(r, f.cfg);
+  assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+  assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
+  assert.strictEqual(fs.readFileSync(f.cfg + '.lock', 'utf8'), lock);
+  success(run(f.mcp));
+  noLock(f.cfg);
+});
+test('BUG an unreadable lock refuses with a recovery step without changing any file', (d) => {
+  const f = files(d);
+  putLock(f.cfg, deadPid());
+  const lock = fs.readFileSync(f.cfg + '.lock', 'utf8');
+  fs.chmodSync(f.cfg + '.lock', 0o000);
+  try {
+    const r = run(f.mcp);
+    assert.strictEqual(r.code, 2, r.err);
+    assert.match(r.err, /EACCES/);
+    remedy(r, f.cfg);
+    assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+    assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
+  } finally { fs.chmodSync(f.cfg + '.lock', 0o600); }
+  assert.strictEqual(fs.readFileSync(f.cfg + '.lock', 'utf8'), lock);
+  success(run(f.mcp));
+  noLock(f.cfg);
+});
 for (const owner of ['foreign', 'unknown', 'truncated', 'invalid']) {
   test(`BUG ${owner} ownership is refused, never guessed dead`, (d) => {
     const f = files(d);
@@ -166,8 +212,7 @@ for (const owner of ['foreign', 'unknown', 'truncated', 'invalid']) {
     assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
     assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
     assert.strictEqual(fs.readFileSync(f.cfg + '.lock', 'utf8'), lock);
-    assert.match(r.err, /check that no apply is still running on any host/i, 'refusal must explain what to check');
-    assert.ok(r.err.includes(`Only then remove ${f.cfg}.lock and run apply again`), 'refusal must name the safe recovery step');
+    remedy(r, f.cfg);
     // These fixture locks have no owner; follow the remedy and confirm retry heals.
     fs.unlinkSync(f.cfg + '.lock');
     success(run(f.mcp));
@@ -175,7 +220,7 @@ for (const owner of ['foreign', 'unknown', 'truncated', 'invalid']) {
   });
 }
 for (const stage of ['before-reap', 'during-reap']) {
-  test(`BUG two reclaimers at ${stage} preserve each successful update`, (d) => {
+  test(`BUG two processes recovering a lock at ${stage} preserve each successful update`, (d) => {
     const f = files(d), result = path.join(d, 'peer.json');
     putLock(f.cfg, deadPid());
     success(run(f.mcp, {
@@ -214,7 +259,7 @@ test('BUG a delayed stale observer cannot remove a new live owner\'s lock', (d) 
   noLock(f.cfg);
 });
 for (const stage of ['kill-reap', 'kill-after-reap']) {
-  test(`BUG ${stage}: the next apply cleans the abandoned claim and heals`, (d) => {
+  test(`BUG ${stage}: the next apply cleans the abandoned recovery link and heals`, (d) => {
     const f = files(d);
     putLock(f.cfg, deadPid());
     const r = spawnSync(process.execPath, ['-r', PRELOAD, BIN, ...f.mcp], {
@@ -281,18 +326,21 @@ test('BUG read-only config folder refuses even a no-op apply without leaving a l
     const r = run(['apply', f.cfg, '--config', f.cfg]);
     assert.strictEqual(r.code, 2, r.err);
     assert.ok(r.err.includes(f.cfg + '.lock'), r.err);
+    assert.match(r.err, /permissions|exclusive create/i, 'lock creation refusal must suggest a remedy');
     assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
     noLock(f.cfg);
   } finally { fs.chmodSync(d, 0o700); }
 });
-for (const sharedKind of ['missing', 'dangling']) {
+for (const sharedKind of ['missing', 'dangling', 'malformed', 'duplicate']) {
   test(`BUG ${sharedKind} shared file refuses apply without creating the config folder`, (d) => {
     const cfg = path.join(d, 'new', 'nested', 'config.toml'), shared = path.join(d, 'shared.toml');
     if (sharedKind === 'dangling') fs.symlinkSync(path.join(d, 'absent.toml'), shared);
+    if (sharedKind === 'malformed') fs.writeFileSync(shared, 'model = "unterminated\n');
+    if (sharedKind === 'duplicate') fs.writeFileSync(shared, '[x]\ny = 1\n[x]\nz = 2\n');
     const before = fs.readdirSync(d).sort();
     const r = run(['apply', shared, '--config', cfg]);
     assert.strictEqual(r.code, 2, r.err);
-    assert.ok(r.err.includes(`no shared file at ${shared}`), r.err);
+    assert.match(r.err, /no shared file|string not closed|define \[x\] twice/);
     assert.deepStrictEqual(fs.readdirSync(d).sort(), before, 'refused apply must not create the config folder');
   });
 }
@@ -322,9 +370,60 @@ for (const stage of ['no-exclusive', 'no-links']) {
     assert.ok(r.err.includes(f.cfg + '.lock'), r.err);
     assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
     assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
-    if (stage === 'no-exclusive') noLock(f.cfg);
+    if (stage === 'no-exclusive') {
+      assert.match(r.err, /exclusive create/);
+      assert.match(r.err, /permissions|filesystem/i, 'lock creation refusal must suggest a remedy');
+      noLock(f.cfg);
+    } else {
+      remedy(r, f.cfg);
+      fs.unlinkSync(f.cfg + '.lock');
+      success(run(f.mcp));
+      noLock(f.cfg);
+    }
   });
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exitCode = failed ? 1 : 0;
+function parallel(args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, ...args], { env: process.env, timeout: 15000 });
+    let out = '', err = '', error;
+    child.stdout.on('data', (b) => { out += b; });
+    child.stderr.on('data', (b) => { err += b; });
+    child.on('error', (e) => { error = e; });
+    child.on('close', (code, signal) => resolve({ code, signal, out, err, error }));
+  });
+}
+test('CMP six parallel applies without barriers preserve every successful compatible update', async (d) => {
+  const rounds = Number(process.env.OVERLAP_ROUNDS || 12);
+  assert.ok(Number.isSafeInteger(rounds) && rounds > 0, 'OVERLAP_ROUNDS must be a positive integer');
+  const dead = deadPid();
+  let completed = 0, refused = 0;
+  for (let n = 0; n < rounds; n++) {
+    const f = files(d);
+    if (n % 2) putLock(f.cfg, dead);
+    const operations = ['mcp', 'profile', 'mcp', 'profile', 'mcp', 'profile'];
+    const results = await Promise.all(operations.map((op) => parallel(f[op])));
+    for (const r of results) {
+      assert.ifError(r.error);
+      assert.strictEqual(r.signal, null, r.err);
+      if (r.code === 0) completed++;
+      else {
+        assert.strictEqual(r.code, 2, r.err);
+        assert.match(r.err, /lock busy after waiting 500 ms/, 'only a bounded busy-lock refusal is expected');
+        remedy(r, f.cfg);
+        refused++;
+      }
+    }
+    assert.ok(results.some((r) => r.code === 0), 'at least one apply must finish');
+    const succeeded = (op) => results.some((r, i) => operations[i] === op && r.code === 0);
+    contains(fs.readFileSync(f.cfg, 'utf8'), succeeded('mcp') ? MCP_NEW : MCP_OLD,
+      succeeded('profile') ? PROFILE_NEW : PROFILE_OLD);
+    noLock(f.cfg);
+  }
+  console.log(`     ${rounds * 6} runs: ${completed} succeeded, ${refused} busy refusals, 0 lost updates`);
+});
+
+chain.then(() => {
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exitCode = failed ? 1 : 0;
+});

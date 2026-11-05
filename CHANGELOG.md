@@ -6,14 +6,13 @@
   backup and rename. Two overlapping applies could previously both succeed and lose one writer's change.
 - A competing apply waits in 50 ms steps (500 ms total), then exits 2 naming the lock and its holder,
   without changing the config or backup. A normal exit removes its own lock, including on refusal.
-- A busy lock's refusal explains manual recovery, including for an incomplete record: check that no apply is
+- A lock refusal explains manual recovery, including for an incomplete or unreadable record: check that no apply is
   still running on any host using the config, then remove the named lock and retry.
-- A dead local holder is recovered automatically. Hard links arbitrate competing reclaimers; abandoned
-  claims from dead reclaimers are cleaned on retry. A live PID (even if reused), foreign host or incomplete
+- A dead local holder is recovered automatically. Hard links let one process recover a lock at a time; abandoned
+  recovery links from dead processes are cleaned on retry. A live PID (even if reused), foreign host or incomplete
   lock record is never taken over. Recovery requires reliable hard links and inode/link counts.
-- `--dry-run`, `extract` and `check` take no lock. A missing shared file (including a dangling link) is
-  refused before creating a config folder or lock. With a shared file present, a missing config folder
-  is created before locking; an unwritable one refuses apply, including when already in sync.
+- `--dry-run`, `extract` and `check` take no lock. An unwritable config folder refuses apply, including when
+  already in sync.
 
 ## 0.1.1 (2026-11-05)
 
