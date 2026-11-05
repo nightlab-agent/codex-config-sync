@@ -121,6 +121,7 @@ function main(argv) {
     const text = shareable(live, keep).join(live.eol) + live.eol;
     if (args.out) {
       if (sameFile(args.out, config)) throw new SplitError(`${args.out} is the live config: extract would replace it and drop its machine-local entries. Name another file.`);
+      if (sameFile(linkTarget(args.out) + '.bak', config)) throw new SplitError(`${args.out}.bak is the live config: extract keeps the old output there and would replace it. Name another file.`);
       const backedUp = writeOutput(args.out, text);
       console.error(`wrote ${args.out}${backedUp ? `; the old file is ${linkTarget(args.out)}.bak` : ''}`);
     } else process.stdout.write(text);

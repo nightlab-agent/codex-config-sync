@@ -97,6 +97,24 @@ test('BUG L2b extract -o naming the live config itself drops its trust tables', 
   assert.ok(fs.readFileSync(cfg, 'utf8').includes('[projects."/x"]'),
     `the live config lost its trust table (exit ${r.code}, stderr: ${r.err.trim()})`);
 });
+test('BUG L3 extract -o whose backup name is the live config drops its trust tables', (d) => {
+  const live = path.join(d, 'out.toml.bak');
+  fs.writeFileSync(live, TRUST);
+  fs.writeFileSync(path.join(d, 'out.toml'), 'old = 1\n');
+  const r = run(['extract', '--config', live, '-o', path.join(d, 'out.toml')]);
+  assert.strictEqual(fs.readFileSync(live, 'utf8'), TRUST, `the live config was replaced (exit ${r.code})`);
+  assert.strictEqual(r.code, 2);
+});
+test('BUG L3b the same through a link at the live config', (d) => {
+  const real = path.join(d, 'out.toml.bak');
+  const cfg = path.join(d, 'config.toml');
+  fs.writeFileSync(real, TRUST);
+  fs.symlinkSync(real, cfg);
+  fs.writeFileSync(path.join(d, 'out.toml'), 'old = 1\n');
+  const r = run(['extract', '--config', cfg, '-o', path.join(d, 'out.toml')]);
+  assert.strictEqual(fs.readFileSync(real, 'utf8'), TRUST, `the live config was replaced (exit ${r.code})`);
+  assert.strictEqual(r.code, 2);
+});
 test('CMP L2 extract -o to another file keeps the live trust tables', (d) => {
   const cfg = path.join(d, 'config.toml'), out = path.join(d, 'shared.toml');
   fs.writeFileSync(cfg, TRUST);

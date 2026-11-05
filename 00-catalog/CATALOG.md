@@ -2,7 +2,9 @@
 
 | Path | Read it when |
 |---|---|
-| `bin/codex-config-sync.js` | You change what it splits, keeps or writes. |
+| `bin/codex-config-sync.js` | You change what it writes or refuses. |
+| `bin/toml-lines.js` | You change how a config is split, shared or merged. |
+| `tests/review-link.test.js`, `tests/review-link-kill.js` | You change how links and the live config are handled. |
 | `tests/test.js` | You change behaviour: add a case first. |
 | `tests/release.sh` | You release. |
 | `01-context/purpose.md` | You judge whether a change fits. |

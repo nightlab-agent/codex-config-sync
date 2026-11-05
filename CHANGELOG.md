@@ -14,6 +14,7 @@
 - A link whose path goes through something that is not a folder (a dangling link, a plain file) is refused with exit 2, as the system refuses it.
 - `extract -o` aimed at the live config, by its own name or through a link, is refused with exit 2. Before, it replaced the file and dropped its
   trust tables, which stayed only in `FILE.bak`. Anyone whose `config.toml` links to the file named in the README's first command hit this.
+- `extract -o FILE` is refused when `FILE.bak` is the live config: the backup would have replaced it.
 - A link whose text ends in `/` or `/.` is refused with exit 2, as the system refuses it.
 - Two child tables of separate `[[array]]` elements are accepted. `x.y = 1` with a later `[x]` is refused.
 - A file that cannot be read exits 2, not 1, which `check` keeps for drift.
