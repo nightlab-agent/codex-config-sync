@@ -91,6 +91,8 @@ A lock refusal tells you how to recover manually: check that no apply is still r
 this config. Only then remove the named lock file and run `apply` again. An incomplete record may be
 left by an interrupted lock write; waiting alone will not repair it.
 
+[Try the overlap regression](docs/try-the-overlap.md) in a temp folder to see the check for a lost update.
+
 If Codex saves a trust choice while `apply` runs, `apply`
 reads the file again and starts over (three tries), so the new table is kept. The last check runs just before
 the backup and config renames, so a save after that check can still be lost; Codex does not honor this tool's lock.
