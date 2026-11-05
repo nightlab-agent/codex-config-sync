@@ -46,6 +46,7 @@ function walkLink(dir, to) {
     if (!fs.statSync(at, { throwIfNoEntry: false })?.isDirectory()) throw new SplitError(`${to}: ${at} is not a folder`);
     at = part === '..' ? path.dirname(at) : real(path.join(at, part));
   }
+  if (/(^|\/)\.?$/.test(to)) throw new SplitError(`${to}: a link ending in a slash names a folder, not a file`);
   return at;
 }
 
@@ -59,6 +60,12 @@ function replaceFile(file, text, mode, stillSafe) {
   if (stillSafe && !stillSafe()) { fs.rmSync(tmp, { force: true }); return false; }
   fs.renameSync(tmp, file);
   return true;
+}
+
+// True when the two names reach one file, through links or not.
+function sameFile(a, b) {
+  const [x, y] = [a, b].map((f) => fs.statSync(f, { throwIfNoEntry: false }));
+  return !!x && !!y && x.dev === y.dev && x.ino === y.ino;
 }
 
 // extract's output: a link is written where it points, and an old file is kept as FILE.bak.
@@ -113,6 +120,7 @@ function main(argv) {
     if (!live) throw new SplitError(`no live config at ${config}`);
     const text = shareable(live, keep).join(live.eol) + live.eol;
     if (args.out) {
+      if (sameFile(args.out, config)) throw new SplitError(`${args.out} is the live config: extract would replace it and drop its machine-local entries. Name another file.`);
       const backedUp = writeOutput(args.out, text);
       console.error(`wrote ${args.out}${backedUp ? `; the old file is ${linkTarget(args.out)}.bak` : ''}`);
     } else process.stdout.write(text);
