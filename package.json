@@ -10,5 +10,5 @@
   "license": "MIT",
   "author": "Nightlab",
   "engines": { "node": ">=18" },
-  "files": ["bin/codex-config-sync.js", "CHANGELOG.md"]
+  "files": ["bin/codex-config-sync.js", "bin/toml-lines.js", "CHANGELOG.md"]
 }
