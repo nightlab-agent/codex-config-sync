@@ -66,8 +66,14 @@ function deadPid() {
   assert.throws(() => process.kill(r.pid, 0), (e) => e.code === 'ESRCH');
   return r.pid;
 }
-function putLock(cfg, pid, host = os.hostname()) {
-  fs.writeFileSync(cfg + '.lock', JSON.stringify({ pid, host }));
+function namespace() {
+  try { return fs.readlinkSync('/proc/self/ns/pid'); } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
+    throw e;
+  }
+}
+function putLock(cfg, pid, host = os.hostname(), ns = namespace()) {
+  fs.writeFileSync(cfg + '.lock', JSON.stringify({ pid, host, namespace: ns }));
 }
 function successOrConflict(r) {
   if (r.code === 0) return;
@@ -371,10 +377,11 @@ for (const stage of ['no-exclusive', 'no-links']) {
     assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
     assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
     if (stage === 'no-exclusive') {
-      assert.match(r.err, /exclusive create/);
+      assert.match(r.err, /exclusive create unsupported/);
       assert.match(r.err, /permissions|filesystem/i, 'lock creation refusal must suggest a remedy');
       noLock(f.cfg);
     } else {
+      assert.match(r.err, /hard links unsupported/);
       remedy(r, f.cfg);
       fs.unlinkSync(f.cfg + '.lock');
       success(run(f.mcp));
@@ -421,6 +428,280 @@ test('CMP six parallel applies without barriers preserve every successful compat
     noLock(f.cfg);
   }
   console.log(`     ${rounds * 6} runs: ${completed} succeeded, ${refused} busy refusals, 0 lost updates`);
+});
+
+
+// A real apply pauses before the backup rename; always release it, even on assertion failure.
+async function held(d, args, inNamespace = false) {
+  const ready = path.join(d, 'ready'), release = path.join(d, 'release');
+  const cli = ['-r', LOCK_PRELOAD, BIN, ...args];
+  // Node is PID 1 inside unshare and spawns the actual holder above PID 1.
+  const command = inNamespace ? 'unshare' : process.execPath;
+  let innerPid = 64;
+  if (inNamespace) {
+    // Use an inner PID absent outside, so an outer live process cannot mask takeover.
+    for (; innerPid < 1024; innerPid++) {
+      try { process.kill(innerPid, 0); } catch (e) { if (e.code === 'ESRCH') break; }
+    }
+    assert.ok(innerPid < 1024, 'need an unused outer PID for the namespace regression');
+  }
+  const argv = inNamespace ? ['-Urpf', '--mount-proc', process.execPath, '-e',
+    'const cp = require("child_process"); for (let n=2; n<Number(process.env.LOCK_INNER_PID); n++) { if (cp.spawnSync("true").status !== 0) throw new Error("PID setup failed"); } const c = cp.spawn(process.execPath, process.argv.slice(1), {stdio:"inherit"}); c.on("exit", n => {process.exitCode = n;});', '--', ...cli] : cli;
+  const c = spawn(command, argv, { timeout: 15000, env: { ...process.env,
+    LOCK_CONFIG: args[3], LOCK_STAGE: 'hold-backup', LOCK_READY: ready, LOCK_RELEASE: release, LOCK_INNER_PID: String(innerPid) } });
+  let out = '', err = '', ended = false;
+  c.stdout.on('data', b => { out += b; });
+  c.stderr.on('data', b => { err += b; });
+  const done = new Promise((resolve, reject) => {
+    c.on('error', reject);
+    c.on('close', (code, signal) => { ended = true; resolve({ code, signal, out, err }); });
+  });
+  const end = Date.now() + 7000;
+  while (!fs.existsSync(ready)) {
+    if (ended || Date.now() > end) {
+      fs.writeFileSync(release, 'release');
+      await done;
+      throw new Error(`holder did not reach barrier: ${err}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return () => { fs.writeFileSync(release, 'release'); return done; };
+}
+for (const changed of ['replaced', 'gone', 'ours']) {
+  test(`release after commit when lock is ${changed} preserves ownership and success`, async d => {
+    const f = files(d), finish = await held(d, f.mcp);
+    let r, other, owner;
+    try {
+      owner = JSON.parse(fs.readFileSync(f.cfg + '.lock', 'utf8'));
+      if (changed !== 'ours') fs.unlinkSync(f.cfg + '.lock');
+      if (changed === 'replaced') {
+        putLock(f.cfg, process.pid);
+        other = fs.readFileSync(f.cfg + '.lock');
+      }
+    } finally { r = await finish(); }
+    success(r);
+    assert.strictEqual(owner.namespace, namespace(), 'record must identify the PID namespace');
+    contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
+    if (other) assert.deepStrictEqual(fs.readFileSync(f.cfg + '.lock'), other);
+    else noLock(f.cfg);
+  });
+}
+for (const stage of ['unlock-gone', 'unlock-error']) {
+  test(`refusal retains its parse reason despite ${stage}`, d => {
+    const f = files(d);
+    fs.writeFileSync(f.cfg, 'model = "unterminated\n');
+    const r = run(f.mcp, { LOCK_CONFIG: f.cfg, LOCK_STAGE: stage }, ['-r', LOCK_PRELOAD]);
+    assert.strictEqual(r.code, 2, r.err);
+    assert.match(r.err, /string not closed/);
+    if (stage === 'unlock-error') assert.match(r.err, /injected unlock failure/);
+    assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), 'model = "unterminated\n');
+    assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
+    if (stage === 'unlock-gone') noLock(f.cfg);
+  });
+}
+for (const ns of ['pid:[foreign]', undefined]) {
+  test(`foreign or missing PID namespace ${ns} refuses without probing its pid`, d => {
+    const f = files(d);
+    putLock(f.cfg, 42, os.hostname(), ns);
+    // undefined must produce an old-format record, rather than putLock's default.
+    if (ns === undefined) fs.writeFileSync(f.cfg + '.lock', JSON.stringify({pid:42, host:os.hostname()}));
+    const lock = fs.readFileSync(f.cfg + '.lock');
+    const r = run(f.mcp, { LOCK_CONFIG:f.cfg, LOCK_STAGE:'foreign-namespace' }, ['-r', LOCK_PRELOAD]);
+    assert.strictEqual(r.code, 2, r.err);
+    assert.match(r.err, /lock busy/);
+    assert.doesNotMatch(r.err, /must not probe/);
+    assert.deepStrictEqual(fs.readFileSync(f.cfg + '.lock'), lock);
+    assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+    remedy(r, f.cfg);
+  });
+}
+test('real PID namespace holder above PID 1 remains foreign on the same hostname', async d => {
+  const probe = spawnSync('unshare', ['-Urpf', '--mount-proc', process.execPath, '-e', ''], {encoding:'utf8'});
+  if (probe.error || probe.status !== 0) {
+    console.log(`     real unshare unavailable: ${probe.error?.message || probe.stderr.trim()}; injected namespace case still runs`);
+    return;
+  }
+  const f = files(d), finish = await held(d, f.mcp, true);
+  let r, owner, lock, first;
+  try {
+    lock = fs.readFileSync(f.cfg + '.lock');
+    owner = JSON.parse(lock);
+    assert.ok(owner.pid > 1, 'PID 1 would hide the bug because it is always visible');
+    assert.throws(() => process.kill(owner.pid, 0), e => e.code === 'ESRCH', 'inner PID must be absent outside');
+    console.log(`     real unshare holder PID ${owner.pid}, ${owner.namespace}`);
+    assert.strictEqual(owner.host, os.hostname());
+    assert.strictEqual(typeof owner.namespace, 'string');
+    assert.notStrictEqual(owner.namespace, namespace());
+    r = run(f.profile);
+    assert.strictEqual(r.code, 2, r.err);
+    assert.deepStrictEqual(fs.readFileSync(f.cfg + '.lock'), lock);
+  } finally { first = await finish(); }
+  success(first);
+  contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
+  noLock(f.cfg);
+});
+test('namespace absent on this platform is recorded as null and permits local recovery', d => {
+  const f = files(d);
+  putLock(f.cfg, deadPid(), os.hostname(), null);
+  success(run(f.mcp, {LOCK_CONFIG:f.cfg, LOCK_STAGE:'no-namespace'}, ['-r', LOCK_PRELOAD]));
+  noLock(f.cfg);
+});
+test('foreign namespace recovery links survive local cleanup', d => {
+  const f = files(d);
+  putLock(f.cfg, deadPid(), os.hostname(), 'pid:[foreign]');
+  const r = spawnSync(process.execPath, ['-r', LOCK_PRELOAD, '-r', PRELOAD, BIN, ...f.mcp], {
+    encoding: 'utf8', timeout: 10000, env: { ...process.env,
+      LOCK_CONFIG: f.cfg, LOCK_STAGE: 'namespace-foreign', OVERLAP_CONFIG: f.cfg, OVERLAP_STAGE: 'kill-reap' },
+  });
+  assert.ifError(r.error);
+  assert.strictEqual(r.signal, 'SIGKILL', r.stderr);
+  const claims = fs.readdirSync(d).filter(name => name.startsWith('config.toml.lock.reap-'));
+  assert.strictEqual(claims.length, 1, 'the foreign reclaimer must leave its actual link');
+  const claim = path.join(d, claims[0]), bytes = fs.readFileSync(claim);
+  // The fixture reclaimer is now dead; remove its foreign lock to exercise local cleanup.
+  fs.unlinkSync(f.cfg + '.lock');
+  success(run(f.mcp));
+  assert.deepStrictEqual(fs.readFileSync(claim), bytes);
+});
+test('a live holder inaccessible with EPERM is never reaped', d => {
+  const f = files(d);
+  putLock(f.cfg, 42);
+  const lock = fs.readFileSync(f.cfg + '.lock');
+  const r = run(f.mcp, {LOCK_CONFIG:f.cfg, LOCK_STAGE:'kill-eperm'}, ['-r', LOCK_PRELOAD]);
+  assert.strictEqual(r.code, 2, r.err);
+  assert.deepStrictEqual(fs.readFileSync(f.cfg + '.lock'), lock);
+  assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+  remedy(r, f.cfg);
+});
+test('failed partial lock-record write removes our lock and preserves the original error', d => {
+  const f = files(d);
+  const r = run(f.mcp, {LOCK_CONFIG:f.cfg, LOCK_STAGE:'record-error'}, ['-r', LOCK_PRELOAD]);
+  assert.strictEqual(r.code, 2, r.err);
+  assert.match(r.err, /injected record write failure/);
+  assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+  noLock(f.cfg);
+  success(run(f.mcp));
+});
+test('a holder dying at the last recovery check allows one final acquisition', d => {
+  const f = files(d);
+  putLock(f.cfg, process.pid);
+  success(run(f.mcp, {LOCK_CONFIG:f.cfg, LOCK_STAGE:'last-try'}, ['-r', LOCK_PRELOAD]));
+  noLock(f.cfg);
+});
+test('distinct inode numbers above Number precision cannot authorize recovery', d => {
+  const f = files(d);
+  putLock(f.cfg, deadPid());
+  const lock = fs.readFileSync(f.cfg + '.lock');
+  const r = run(f.mcp, {LOCK_CONFIG:f.cfg, LOCK_STAGE:'large-inode'}, ['-r', LOCK_PRELOAD]);
+  assert.strictEqual(r.code, 2, r.err);
+  assert.deepStrictEqual(fs.readFileSync(f.cfg + '.lock'), lock);
+  assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+});
+for (const readOnly of [false, true]) {
+  test(`symlinked live config retains advice with read-only folder ${readOnly}`, d => {
+    const f = files(d), target = path.join(d, 'target.toml');
+    fs.renameSync(f.cfg, target);
+    fs.symlinkSync(target, f.cfg);
+    if (readOnly) fs.chmodSync(d, 0o555);
+    let r;
+    try { r = run(f.mcp); } finally { fs.chmodSync(d, 0o700); }
+    assert.strictEqual(r.code, 2, r.err);
+    assert.match(r.err, /symlink.*Replace the link with a plain file/);
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), LIVE);
+    noLock(f.cfg);
+  });
+}
+for (const kind of ['path', 'symlink', 'hardlink', 'folder-alias']) {
+  test(`apply refuses shared file at its backup via ${kind} before either file changes`, d => {
+    const f = files(d);
+    const original = fs.readFileSync(f.cfg + '.bak');
+    let shared = f.cfg + '.bak';
+    if (kind === 'symlink' || kind === 'hardlink') {
+      shared = path.join(d, 'alias.toml');
+      if (kind === 'symlink') fs.symlinkSync(f.cfg + '.bak', shared);
+      else fs.linkSync(f.cfg + '.bak', shared);
+    } else if (kind === 'folder-alias') {
+      fs.symlinkSync(d, path.join(d, 'alias'));
+      shared = path.join(d, 'alias', 'config.toml.bak');
+    }
+    const r = run(['apply', shared, '--config', f.cfg]);
+    assert.strictEqual(r.code, 2, r.err);
+    assert.match(r.err, /backup/);
+    assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+    assert.deepStrictEqual(fs.readFileSync(f.cfg + '.bak'), original);
+    assert.deepStrictEqual(fs.readFileSync(shared), original);
+    noLock(f.cfg);
+  });
+}
+for (const valid of [false, true]) {
+  test(`UTF-8 valid ${valid}: apply preserves byte-exact backup or refuses unchanged`, d => {
+    const f = files(d);
+    const bytes = valid ? Buffer.from('model = "café"\r\n') : Buffer.concat([Buffer.from('model = "caf'), Buffer.from([0xe9]), Buffer.from('"\n')]);
+    fs.writeFileSync(f.cfg, bytes);
+    const r = run(f.mcp);
+    if (valid) {
+      success(r);
+      assert.deepStrictEqual(fs.readFileSync(f.cfg + '.bak'), bytes);
+    } else {
+      assert.strictEqual(r.code, 2, r.err);
+      assert.match(r.err, /UTF-8/);
+      assert.deepStrictEqual(fs.readFileSync(f.cfg), bytes);
+      assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
+    }
+    noLock(f.cfg);
+  });
+}
+test('one folder under two names still shares one busy lock', async d => {
+  const f = files(d), finish = await held(d, f.mcp);
+  fs.symlinkSync(d, path.join(d, 'alias'));
+  let r;
+  try { r = run(['apply', f.profile[1], '--config', path.join(d, 'alias', 'config.toml')]); }
+  finally { success(await finish()); }
+  assert.strictEqual(r.code, 2, r.err);
+  contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
+});
+for (const kind of ['path', 'symlink', 'hardlink']) {
+  test(`shared file may still be live config via ${kind}`, d => {
+    const f = files(d);
+    let shared = f.cfg;
+    if (kind !== 'path') {
+      shared = path.join(d, 'same.toml');
+      if (kind === 'symlink') fs.symlinkSync(f.cfg, shared); else fs.linkSync(f.cfg, shared);
+    }
+    const r = run(['apply', shared, '--config', f.cfg]);
+    success(r);
+    assert.match(r.out, /already in sync/);
+    assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+  });
+}
+test('lock disappearing between the release stat and unlink still reports a committed apply', d => {
+  const f = files(d);
+  const r = run(f.mcp, { LOCK_CONFIG: f.cfg, LOCK_STAGE: 'unlink-gone' }, ['-r', LOCK_PRELOAD]);
+  success(r);
+  contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
+  assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), LIVE);
+  noLock(f.cfg);
+});
+test('a dead lock in a read-only folder refuses recovery with the cause and remedy', d => {
+  const f = files(d);
+  putLock(f.cfg, deadPid());
+  const lock = fs.readFileSync(f.cfg + '.lock');
+  fs.chmodSync(d, 0o555);
+  let r;
+  try { r = run(f.mcp); } finally { fs.chmodSync(d, 0o700); }
+  assert.strictEqual(r.code, 2, r.err);
+  assert.match(r.err, /EACCES/);
+  remedy(r, f.cfg);
+  assert.deepStrictEqual(fs.readFileSync(f.cfg + '.lock'), lock);
+  assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+  success(run(f.mcp));
+  noLock(f.cfg);
+});
+test('recovery open ENOENT after the holder releases retries acquisition', d => {
+  const f = files(d);
+  putLock(f.cfg, process.pid);
+  success(run(f.mcp, {LOCK_CONFIG:f.cfg, LOCK_STAGE:'open-gone'}, ['-r', LOCK_PRELOAD]));
+  noLock(f.cfg);
 });
 
 chain.then(() => {

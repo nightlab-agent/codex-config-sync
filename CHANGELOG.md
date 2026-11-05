@@ -9,10 +9,12 @@
 - A lock refusal explains manual recovery, including for an incomplete or unreadable record: check that no apply is
   still running on any host using the config, then remove the named lock and retry.
 - A dead local holder is recovered automatically. Hard links let one process recover a lock at a time; abandoned
-  recovery links from dead processes are cleaned on retry. A live PID (even if reused), foreign host or incomplete
-  lock record is never taken over. Recovery requires reliable hard links and inode/link counts.
+  recovery links from dead processes are cleaned on retry. A live PID (even if reused), foreign host, namespace mismatch or incomplete
+  lock record (including a missing namespace field) is never taken over. Recovery links also identify their PID namespace. Recovery requires reliable hard links and inode/link counts.
 - `--dry-run`, `extract` and `check` take no lock. An unwritable config folder refuses apply, including when
-  already in sync.
+  already in sync. A symlinked config is refused with advice before trying to create the lock.
+- `apply` refuses a shared file that aliases its backup when the config would change; previously the backup
+  replaced the shared file. Invalid UTF-8 input is refused before writing, so decoding cannot change the old bytes in `.bak`.
 
 ## 0.1.1 (2026-11-05)
 

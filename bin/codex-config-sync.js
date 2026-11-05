@@ -65,7 +65,7 @@ function replaceFile(file, text, mode, stillSafe) {
 
 // True when the two names reach one file, through links or not.
 function sameFile(a, b) {
-  const [x, y] = [a, b].map((f) => fs.statSync(f, { throwIfNoEntry: false }));
+  const [x, y] = [a, b].map((f) => fs.statSync(f, { throwIfNoEntry: false, bigint: true }));
   return !!x && !!y && x.dev === y.dev && x.ino === y.ino;
 }
 
@@ -82,7 +82,11 @@ function writeOutput(file, text) {
 
 function readDoc(file, what) {
   let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch (e) {
+  try {
+    const bytes = fs.readFileSync(file);
+    text = bytes.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(bytes)) throw new SplitError(`${what} ${file}: invalid UTF-8; nothing written`);
+  } catch (e) {
     if (e.code === 'ENOENT') return null;
     throw e;
   }
@@ -102,12 +106,22 @@ function deadPid(pid) {
   return false; // EPERM and a reused but live pid are never grounds for takeover.
 }
 
-function claimPrefix(lock) { return `${lock}.reap-${Buffer.from(os.hostname()).toString('hex')}-`; }
+function pidNamespace() {
+  try { return fs.readlinkSync('/proc/self/ns/pid'); } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
+    throw e;
+  }
+}
 
-// Recovery links have unique names and identify the recovering process's host and pid,
+function claimPrefix(lock, namespace) {
+  const identity = Buffer.from(JSON.stringify([os.hostname(), namespace])).toString('hex');
+  return `${lock}.reap-${identity}-`;
+}
+
+// Recovery links have unique names and identify the recovering process's host, PID namespace and pid,
 // even if it died after removing the lock. A live or reused pid leaves its link alone.
-function cleanClaims(lock) {
-  const prefix = path.basename(claimPrefix(lock));
+function cleanClaims(lock, namespace) {
+  const prefix = path.basename(claimPrefix(lock, namespace));
   for (const name of fs.readdirSync(path.dirname(lock))) {
     if (!name.startsWith(prefix)) continue;
     const match = /^(\d+)-[0-9a-f-]{36}$/.exec(name.slice(prefix.length));
@@ -121,11 +135,11 @@ function cleanClaims(lock) {
 // Keep the old inode open throughout recovery. A private hard link selects one process:
 // only the original name plus our link (nlink == 2) permits unlinking the original.
 // A rival keeps its link until its check finishes, so it cannot also pass that check.
-function recoverLock(lock) {
+function recoverLock(lock, namespace) {
   let fd;
   try { fd = fs.openSync(lock, 'r'); } catch (e) { if (e.code === 'ENOENT') return 'holder changed'; throw e; }
   try {
-    const old = fs.fstatSync(fd);
+    const old = fs.fstatSync(fd, { bigint: true });
     if (!old.isFile()) return 'unknown holder (not a regular lock file)';
     let owner;
     try { owner = JSON.parse(fs.readFileSync(fd, 'utf8')); } catch (e) {
@@ -133,15 +147,15 @@ function recoverLock(lock) {
       throw e;
     }
     if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.host !== 'string') return 'unknown holder (invalid lock record)';
-    const holder = `pid ${owner.pid} on ${owner.host}`;
-    if (owner.host !== os.hostname() || !deadPid(owner.pid)) return holder;
+    const holder = `pid ${owner.pid} on ${owner.host} (namespace ${owner.namespace ?? 'unknown'})`;
+    if (owner.host !== os.hostname() || owner.namespace !== namespace || !deadPid(owner.pid)) return holder;
     const isOld = (s) => s && s.dev === old.dev && s.ino === old.ino;
-    cleanClaims(lock);
-    const claim = `${claimPrefix(lock)}${process.pid}-${randomUUID()}`;
+    cleanClaims(lock, namespace);
+    const claim = `${claimPrefix(lock, namespace)}${process.pid}-${randomUUID()}`;
     try { fs.linkSync(lock, claim); } catch (e) { if (e.code === 'ENOENT') return holder; throw e; }
     try {
-      const now = fs.lstatSync(lock, { throwIfNoEntry: false });
-      if (isOld(now) && isOld(fs.lstatSync(claim)) && now.nlink === 2) fs.unlinkSync(lock);
+      const now = fs.lstatSync(lock, { throwIfNoEntry: false, bigint: true });
+      if (isOld(now) && isOld(fs.lstatSync(claim, { bigint: true })) && now.nlink === 2n) fs.unlinkSync(lock);
     } finally { fs.unlinkSync(claim); }
     return holder;
   } catch (e) {
@@ -159,26 +173,46 @@ function lockConfig(config) {
   const lock = config + '.lock';
   try {
     fs.mkdirSync(path.dirname(config), { recursive: true });
+    const namespace = pidNamespace();
     const pause = new Int32Array(new SharedArrayBuffer(4));
     let holder;
-    for (let n = 0; n <= 10; n++) {
+    for (let n = 0; n <= 11; n++) {
       let fd;
       try { fd = fs.openSync(lock, 'wx', 0o600); } catch (e) { if (e.code !== 'EEXIST') throw e; }
       if (fd !== undefined) {
-        try {
-          try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname() }) + '\n'); }
+        let own;
+        // Keep the descriptor open so an unlinked inode cannot be reused before release.
+        const release = () => {
+          try {
+            const now = fs.lstatSync(lock, { throwIfNoEntry: false, bigint: true });
+            if (own && now && own.dev === now.dev && own.ino === now.ino) fs.unlinkSync(lock);
+          } catch (e) { if (e.code !== 'ENOENT') throw e; }
           finally { fs.closeSync(fd); }
-          cleanClaims(lock);
-        } catch (e) { fs.unlinkSync(lock); throw e; }
-        return () => fs.unlinkSync(lock);
+        };
+        try {
+          own = fs.fstatSync(fd, { bigint: true });
+          fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), namespace }) + '\n');
+          cleanClaims(lock, namespace);
+        } catch (e) {
+          try { release(); } catch (cleanup) { console.error(`codex-config-sync: could not release ${lock}: ${cleanup.message}`); }
+          throw e;
+        }
+        return release;
       }
-      holder = recoverLock(lock);
+      if (n === 11) break; // One final acquisition after the last recovery, without another wait.
+      holder = recoverLock(lock, namespace);
       if (n < 10) Atomics.wait(pause, 0, 0, 50);
     }
     throw new SplitError(`${lock}: lock busy after waiting 500 ms; holder: ${holder}; nothing written. ${lockRemedy(lock)}`);
   } catch (e) {
     if (e instanceof SplitError) throw e;
     throw new SplitError(`${lock}: ${e.message}. Check folder permissions and filesystem support for exclusive create and hard links. If the lock remains: ${lockRemedy(lock)}`);
+  }
+}
+
+function refuseLinkedConfig(config) {
+  if (fs.lstatSync(config, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new SplitError(`${config} is a symlink, which apply does not write through. Replace the link with a plain file, then run apply.`);
   }
 }
 
@@ -225,6 +259,8 @@ function main(argv) {
     if (!doc) throw new SplitError(`no shared file at ${shared}`);
     split(merge(doc, split(''), keep).lines.join(doc.eol) + doc.eol);
   }
+  if (cmd === 'apply' && !args.dry) refuseLinkedConfig(config);
+  let failure;
   const unlock = cmd === 'apply' && !args.dry ? lockConfig(config) : () => {};
   try {
     const sharedDoc = readDoc(shared, 'shared file');
@@ -242,11 +278,7 @@ function main(argv) {
       return 1;
     }
 
-    let isLink = false;
-    try { isLink = fs.lstatSync(config).isSymbolicLink(); } catch {}
-    if (isLink && !args.dry) {
-      throw new SplitError(`${config} is a symlink, which apply does not write through. Replace the link with a plain file, then run apply.`);
-    }
+    if (!args.dry) refuseLinkedConfig(config);
     // Codex may save a trust choice while this runs: merge from one read, and start again if the
     // file changed before the rename (three tries).
     let live = liveDoc;
@@ -260,6 +292,9 @@ function main(argv) {
       const before = live.text === undefined ? null : live.text;
       const kept = `${m.kept} local entr${m.kept === 1 ? 'y' : 'ies'} kept`;
       if (before === text) { console.log(`already in sync (${kept})`); return 0; }
+      if (sameFile(shared, config + '.bak')) {
+        throw new SplitError(`${shared} aliases the config backup. Copy the shared file elsewhere before applying.`);
+      }
       const unchanged = () => {
         let now = null;
         try { now = fs.readFileSync(config, 'utf8'); } catch {}
@@ -281,7 +316,13 @@ function main(argv) {
       console.log(`wrote ${config} (${kept}${before !== null ? `; the old file is ${config}.bak` : ''})`);
       return 0;
     }
-  } finally { unlock(); }
+  } catch (e) { failure = e; throw e; }
+  finally {
+    try { unlock(); } catch (e) {
+      if (!failure) throw e;
+      console.error(`codex-config-sync: could not release ${config}.lock: ${e.message}`);
+    }
+  }
 }
 
 module.exports = { split, shareable, merge, SplitError };

@@ -74,15 +74,19 @@ It then exclusively creates `config.toml.lock` beside the live config before rea
 and holds it through the backup and rename.
 When the lock is busy, another apply waits in 50 ms steps (500 ms total), then refuses with exit 2,
 naming the lock file and its holder's PID and hostname when known. Errors reading or recovering a lock
-refuse with the cause and recovery steps. These refusals leave the config and backup alone. Every normal
-exit removes the run's own lock, including when already in sync or refusing a malformed config. `--dry-run`,
-`extract` and `check` take no lock.
+refuse with the cause and recovery steps. These refusals leave the config and backup alone. On exit the run
+removes its lock only if the device and inode still match,
+including when already in sync or refusing a malformed config. An already removed lock does not turn
+a committed apply into an error; a release failure during a refusal is reported alongside the original reason.
+`--dry-run`, `extract` and `check` take no lock.
 
-A lock from a dead PID on the same hostname is recovered automatically. Processes recovering a lock use hard
-links to avoid removing a new owner's lock. A live PID is never taken over, even if it was reused;
-foreign hosts and incomplete lock records are refused. This needs a filesystem that honors exclusive create,
+A lock from a dead PID on the same hostname and in the same PID namespace is recovered automatically.
+The record includes the PID namespace from `/proc/self/ns/pid`, or `null` where that path is absent.
+Processes recovering a lock use hard links to avoid removing a new owner's lock. A live PID is never taken over, even if it was reused;
+foreign hosts, namespace mismatches, and incomplete lock records (including a missing namespace field) are
+refused. This needs a filesystem that honors exclusive create,
 and recovery needs reliable hard links and inode/link counts. Network home folders are untested; automatic
-recovery assumes unique hostnames and a shared local PID namespace.
+recovery assumes unique hostnames and, where namespace information is absent, a shared local PID namespace.
 A lock refusal tells you how to recover manually: check that no apply is still running on any host using
 this config. Only then remove the named lock file and run `apply` again. An incomplete record may be
 left by an interrupted lock write; waiting alone will not repair it.
@@ -96,17 +100,19 @@ A power loss can still lose the config or backup, even after a successful apply;
 
 - It does not copy files between machines. Use git, your dotfiles manager, or a synced folder for the shared file.
 - It does not touch `auth.json`, sessions or history. It writes `config.toml`, `config.toml.bak`, the temporary
-  `config.toml.lock` (and `config.toml.lock.reap-<host>-<pid>-<id>` hard links during recovery), the
-  file you name with `-o` and that file's `.bak` copy when it already existed (when that file is a link, the
+  `config.toml.lock` (and `config.toml.lock.reap-<identity>-<pid>-<id>` hard links during recovery, with
+  identity encoding the hostname and PID namespace), the file you name with `-o` and that file's `.bak` copy when it already existed (when that file is a link, the
   write and the `.bak` land beside the file it points to). A run killed mid-write can leave a
   `.config.toml.<pid>.tmp` or `.config.toml.bak.<pid>.tmp` beside the file; these are safe to delete.
   It can also leave a lock or recovery link;
   retrying apply recovers identifiable dead local holders. Inspect uncertain ownership before removing a lock
   by hand, and never remove one while an apply may still be running.
 - Trust tables inside the shared file are ignored (it says how many). Trust stays per machine.
-- It refuses without replacing the config or backup when a file has a string or bracket it cannot follow,
+- It refuses without replacing the config or backup when a file is not valid UTF-8, has a string or bracket it cannot follow,
   when the result would
   define a table twice (two `[x]` headers, or `x.y = 1` above the first table with a later `[x]`), or when `config.toml` is a symlink. Replace the link with a plain file, then run `apply`.
+- `apply` refuses a shared file that is also `config.toml.bak`, including aliases through links, when
+  the config would change. Copy the shared file elsewhere first so the backup can hold the old config.
 - `extract -o` refuses to write over the live config, or to keep its backup there, by its name or through a link, so a `config.toml` that links into your dotfiles needs another output file.
 - It is not a full TOML validator. It checks only what it needs to split the file safely.
 - If Codex later keeps trust in a separate file, you will not need this tool for trust tables.
@@ -114,7 +120,7 @@ A power loss can still lose the config or backup, even after a successful apply;
 ## Develop
 
 ```sh
-node tests/test.js
+sh tests/release.sh
 ```
 
 The `.claude-plugin` folder is metadata only: installed as a Claude Code plugin, this repo puts
