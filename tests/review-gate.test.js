@@ -115,6 +115,40 @@ test('CMP G3b a temp file left by a killed run does not block the next', (d) => 
   assert.strictEqual(r.code, 0, r.err);
   assert.strictEqual(fs.readFileSync(cfg, 'utf8'), 'model = "b"\n');
 });
+test('CMP G3c apply killed after backup preserves settings; retry matches a successful sync', (d) => {
+  const cfg = path.join(d, 'config.toml'), sh = path.join(d, 'shared.toml');
+  const control = path.join(d, 'control.toml');
+  const live = 'model = "a"\n\n[projects."/work"]\ntrust_level = "trusted"\n';
+  const shared = 'model = "b"\n';
+  fs.writeFileSync(cfg, live); fs.writeFileSync(control, live); fs.writeFileSync(sh, shared);
+  fs.chmodSync(cfg, 0o600); fs.chmodSync(control, 0o600);
+  fs.writeFileSync(cfg + '.bak', 'model = "previous"\n');
+
+  const normal = run(['apply', sh, '--config', control]);
+  assert.strictEqual(normal.code, 0, normal.err);
+  const expected = shared + '\n[projects."/work"]\ntrust_level = "trusted"\n';
+  assert.strictEqual(fs.readFileSync(control, 'utf8'), expected);
+  assert.strictEqual(fs.readFileSync(control + '.bak', 'utf8'), live);
+
+  // The first rename installs the backup; stop just before the second replaces the live file.
+  const killed = spawnSync(process.execPath, ['-r', path.join(__dirname, 'review-link-kill.js'),
+    BIN, 'apply', sh, '--config', cfg], {
+    encoding: 'utf8', env: { ...process.env, LINK_REVIEW_KILL_RENAME: '2' },
+  });
+  assert.strictEqual(killed.signal, 'SIGKILL', `exit ${killed.status}: ${killed.stderr}`);
+  assert.strictEqual(fs.readFileSync(cfg, 'utf8'), live);
+  assert.strictEqual(fs.readFileSync(cfg + '.bak', 'utf8'), live);
+  assert.strictEqual(octal(cfg), '600');
+  assert.strictEqual(octal(cfg + '.bak'), '600');
+  assert.ok(fs.readdirSync(d).some((f) => /^\.config\.toml\.\d+\.tmp$/.test(f)));
+
+  const retry = run(['apply', sh, '--config', cfg]);
+  assert.strictEqual(retry.code, 0, retry.err);
+  assert.strictEqual(fs.readFileSync(cfg, 'utf8'), expected);
+  assert.strictEqual(fs.readFileSync(cfg + '.bak', 'utf8'), live);
+  assert.strictEqual(octal(cfg), '600');
+  assert.strictEqual(octal(cfg + '.bak'), '600');
+});
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exitCode = failed ? 1 : 0;
