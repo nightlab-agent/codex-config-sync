@@ -1,4 +1,4 @@
-// Gate review (s465): each suspected fault beside its nearest passing comparison.
+// Each suspected fault beside its nearest passing comparison.
 'use strict';
 const assert = require('assert');
 const fs = require('fs');
