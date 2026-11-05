@@ -268,6 +268,7 @@ function replaceFile(file, text, mode, stillSafe) {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
   fs.rmSync(tmp, { force: true });
   fs.writeFileSync(tmp, text, { mode, flag: 'wx' });
+  fs.chmodSync(tmp, mode); // the umask has cut the mode the write asked for
   if (stillSafe && !stillSafe()) { fs.rmSync(tmp, { force: true }); return false; }
   fs.renameSync(tmp, file);
   return true;
@@ -377,8 +378,13 @@ function main(argv) {
     };
     if (!unchanged()) { again(); continue; }
     const mode = modeOf(config);
-    if (before !== null) replaceFile(config + '.bak', before, mode);
-    if (!replaceFile(config, text, mode, unchanged)) { again(); continue; }
+    // The backup goes last of all: a refused try must leave the last good one.
+    const safe = () => {
+      if (!unchanged()) return false;
+      if (before !== null) replaceFile(config + '.bak', before, mode);
+      return true;
+    };
+    if (!replaceFile(config, text, mode, safe)) { again(); continue; }
     console.log(`wrote ${config} (${kept}${before !== null ? `; the old file is ${config}.bak` : ''})`);
     return 0;
   }

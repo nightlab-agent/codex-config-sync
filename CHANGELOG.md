@@ -4,7 +4,8 @@
 
 - A trust table written as `["\U00000070rojects"."/x"]`, with TOML's eight-digit escape, is now seen as machine-local;
   before, `extract` put it in the shared file. A key with an escape the tool cannot read is refused.
-- `config.toml.bak` is written by rename with the mode of `config.toml`: a `.bak` that is a link no longer sends the
+- A refused `apply` keeps your last `config.toml.bak`: the backup is written only once the write is going ahead.
+- `config.toml.bak` is written by rename with exactly the mode of `config.toml`, whatever the umask: a `.bak` that is a link no longer sends the
   write to another file, and an old `.bak` with wider permissions no longer exposes a private config.
 - `apply` reads the file once more just before the rename, so a trust choice saved while the backup was being
   written is kept.

@@ -40,7 +40,7 @@ codex-config-sync apply ~/.dotfiles/codex/config.toml
 `~/.codex/config.toml` and adds back this machine's trust tables. Every other setting on this machine is
 replaced by the shared one, including settings the shared file does not have; run `check` first to see them,
 and use `--keep` for a table that should stay per machine. The old file is kept as `config.toml.bak` (one copy:
-the next `apply` that changes something overwrites it). Running it again when nothing changed writes nothing.
+the next `apply` that changes something overwrites it). Running `apply` again when nothing changed writes nothing.
 
 To see whether a machine has drifted (for a script or a shell startup line):
 
@@ -74,7 +74,8 @@ the rename, so only a save inside that last instant can still be lost; Codex has
 
 - It does not copy files between machines. Use git, your dotfiles manager, or a synced folder for the shared file.
 - It does not touch `auth.json`, sessions or history. It writes only `config.toml`, `config.toml.bak`, the
-  file you name with `-o` and that file's `.bak` copy when it already existed.
+  file you name with `-o` and that file's `.bak` copy when it already existed. A run killed mid-write can leave a
+  `.config.toml.<pid>.tmp` beside the file; it is safe to delete.
 - Trust tables inside the shared file are ignored (it says how many). Trust stays per machine.
 - It refuses, and writes nothing, when a file has a string or bracket it cannot follow, when the result would
   define a table twice (two `[x]` headers, or `x.y = 1` above the first table with a later `[x]`), or when `config.toml` is a symlink. Replace the link with a plain file, then run `apply`.

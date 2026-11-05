@@ -42,7 +42,7 @@ function extractThroughLink(d, aliasParent) {
   assert.ok(fs.lstatSync(out).isSymbolicLink(), 'extract must keep the link');
 }
 
-test('BUG relative output link beneath a symlinked directory follows the OS target', (d) => extractThroughLink(d, true));
+test('CMP relative output link beneath a symlinked directory follows the OS target', (d) => extractThroughLink(d, true));
 test('CMP relative output link beneath a plain directory follows the OS target', (d) => extractThroughLink(d, false));
 
 test('BUG a link whose text goes through a link and then .. follows the OS target', (d) => {
