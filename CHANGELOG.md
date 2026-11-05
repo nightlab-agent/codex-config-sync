@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2 (2026-11-05)
+
+- `apply` exclusively creates `config.toml.lock` before reading the config and holds it through the merge,
+  backup and rename. Two overlapping applies could previously both succeed and lose one writer's change.
+- A competing apply waits in 50 ms steps (500 ms total), then exits 2 naming the lock and its holder,
+  without changing the config or backup. A normal exit removes its own lock, including on refusal.
+- A dead local holder is recovered automatically. Hard links arbitrate competing reclaimers; abandoned
+  claims from dead reclaimers are cleaned on retry. A live PID (even if reused), foreign host or incomplete
+  lock record is never taken over. Recovery requires reliable hard links and inode/link counts.
+- `--dry-run`, `extract` and `check` take no lock. A missing config folder is created before locking;
+  an unwritable one refuses apply, including when already in sync.
+
 ## 0.1.1 (2026-11-05)
 
 - A trust table written as `["\U00000070rojects"."/x"]`, with TOML's eight-digit escape, is now seen as machine-local;

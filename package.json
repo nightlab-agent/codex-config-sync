@@ -1,6 +1,6 @@
 {
   "name": "codex-config-sync",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Share one Codex config.toml across machines while each machine keeps its own [projects.*] trust tables. No dependencies.",
   "bin": { "codex-config-sync": "bin/codex-config-sync.js" },
   "keywords": ["codex", "codex-cli", "openai-codex", "config", "config.toml", "dotfiles", "sync"],

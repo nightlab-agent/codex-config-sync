@@ -66,17 +66,34 @@ multi-line arrays are followed, so a line starting with `[` inside them is not t
 are never parsed or rewritten: each table is moved whole, with the comment lines directly above it.
 The written file is, in order: the shared file's settings above its first table, this machine's trust
 entries written as dotted keys above the first table (such as `projects."/x".trust_level = ...`), the
-shared tables, then this machine's trust tables. If Codex saves a trust choice while `apply` runs, `apply`
+shared tables, then this machine's trust tables.
+
+Before reading, `apply` exclusively creates `config.toml.lock` beside the live config and holds it through
+the merge, backup and rename. Another apply waits in 50 ms steps (500 ms total), then refuses with exit 2
+naming the lock file and its holder's PID and hostname; it leaves the config and backup alone. Every normal
+exit removes the run's own lock, including when already in sync or refusing a malformed config. `--dry-run`,
+`extract` and `check` take no lock.
+
+A lock from a dead PID on the same hostname is recovered automatically. Competing reclaimers use hard
+links to avoid removing a new owner's lock. A live PID is never taken over, even if it was reused;
+foreign hosts and incomplete lock records are refused. This needs a filesystem that honors exclusive create,
+and recovery needs reliable hard links and inode/link counts. Network home folders are untested; automatic
+recovery assumes unique hostnames and a shared local PID namespace.
+
+If Codex saves a trust choice while `apply` runs, `apply`
 reads the file again and starts over (three tries), so the new table is kept. The last check runs just before
-the rename, so only a save inside that last instant can still be lost; Codex has no lock this tool could take.
+the backup and config renames, so a save after that check can still be lost; Codex does not honor this tool's lock.
 
 ## What it does not do
 
 - It does not copy files between machines. Use git, your dotfiles manager, or a synced folder for the shared file.
-- It does not touch `auth.json`, sessions or history. It writes only `config.toml`, `config.toml.bak`, the
+- It does not touch `auth.json`, sessions or history. It writes `config.toml`, `config.toml.bak`, the temporary
+  `config.toml.lock` (and `config.toml.lock.reap-<host>-<pid>-<id>` hard links during recovery), the
   file you name with `-o` and that file's `.bak` copy when it already existed (when that file is a link, the
   write and the `.bak` land beside the file it points to). A run killed mid-write can leave a
-  `.config.toml.<pid>.tmp` beside the file; it is safe to delete.
+  `.config.toml.<pid>.tmp` beside the file; it is safe to delete. It can also leave a lock or recovery link;
+  retrying apply recovers identifiable dead local holders. Inspect uncertain ownership before removing a lock
+  by hand, and never remove one while an apply may still be running.
 - Trust tables inside the shared file are ignored (it says how many). Trust stays per machine.
 - It refuses, and writes nothing, when a file has a string or bracket it cannot follow, when the result would
   define a table twice (two `[x]` headers, or `x.y = 1` above the first table with a later `[x]`), or when `config.toml` is a symlink. Replace the link with a plain file, then run `apply`.

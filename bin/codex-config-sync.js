@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { randomUUID } = require('crypto');
 
 const USAGE = `codex-config-sync: share ~/.codex/config.toml across machines; each machine keeps its trust tables.
 
@@ -96,6 +97,78 @@ function defaultConfig() {
   return path.join(home, 'config.toml');
 }
 
+function deadPid(pid) {
+  try { process.kill(pid, 0); } catch (e) { return e.code === 'ESRCH'; }
+  return false; // EPERM and a reused but live pid are never grounds for takeover.
+}
+
+function claimPrefix(lock) { return `${lock}.reap-${Buffer.from(os.hostname()).toString('hex')}-`; }
+
+// Claims have unique names and identify the reclaimer's host and pid, even if it
+// died after removing the original lock. A live or reused pid leaves its claim alone.
+function cleanClaims(lock) {
+  const prefix = path.basename(claimPrefix(lock));
+  for (const name of fs.readdirSync(path.dirname(lock))) {
+    if (!name.startsWith(prefix)) continue;
+    const match = /^(\d+)-[0-9a-f-]{36}$/.exec(name.slice(prefix.length));
+    if (!match || !deadPid(Number(match[1]))) continue;
+    const file = path.join(path.dirname(lock), name);
+    if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isFile()) continue;
+    try { fs.unlinkSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+}
+
+// Keep the old inode open throughout recovery. A private hard link elects a reclaimer:
+// only the original name plus our link (nlink == 2) permits unlinking the original.
+// A rival keeps its link until its check finishes, so it cannot also pass that check.
+function recoverLock(lock) {
+  let fd;
+  try { fd = fs.openSync(lock, 'r'); } catch (e) { if (e.code === 'ENOENT') return 'holder changed'; throw e; }
+  try {
+    const old = fs.fstatSync(fd);
+    if (!old.isFile()) return 'unknown holder (not a regular lock file)';
+    let owner;
+    try { owner = JSON.parse(fs.readFileSync(fd, 'utf8')); } catch (e) {
+      if (e instanceof SyntaxError) return 'unknown holder (incomplete lock record)';
+      throw e;
+    }
+    if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.host !== 'string') return 'unknown holder (invalid lock record)';
+    const holder = `pid ${owner.pid} on ${owner.host}`;
+    if (owner.host !== os.hostname() || !deadPid(owner.pid)) return holder;
+    const isOld = (s) => s && s.dev === old.dev && s.ino === old.ino;
+    cleanClaims(lock);
+    const claim = `${claimPrefix(lock)}${process.pid}-${randomUUID()}`;
+    try { fs.linkSync(lock, claim); } catch (e) { if (e.code === 'ENOENT') return holder; throw e; }
+    try {
+      const now = fs.lstatSync(lock, { throwIfNoEntry: false });
+      if (isOld(now) && isOld(fs.lstatSync(claim)) && now.nlink === 2) fs.unlinkSync(lock);
+    } finally { fs.unlinkSync(claim); }
+    return holder;
+  } finally { fs.closeSync(fd); }
+}
+
+function lockConfig(config) {
+  const lock = config + '.lock';
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  let holder;
+  for (let n = 0; n <= 10; n++) {
+    let fd;
+    try { fd = fs.openSync(lock, 'wx', 0o600); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (fd !== undefined) {
+      try {
+        try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname() }) + '\n'); }
+        finally { fs.closeSync(fd); }
+        cleanClaims(lock);
+      } catch (e) { fs.unlinkSync(lock); throw e; }
+      return () => fs.unlinkSync(lock);
+    }
+    holder = recoverLock(lock);
+    if (n < 10) Atomics.wait(pause, 0, 0, 50);
+  }
+  throw new SplitError(`${lock}: lock busy after waiting 500 ms; holder: ${holder}; nothing written`);
+}
+
 function main(argv) {
   const args = { keep: [], pos: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -129,61 +202,63 @@ function main(argv) {
   }
   if (cmd !== 'apply' && cmd !== 'check') throw new SplitError(`unknown command ${cmd}`);
   if (!shared) throw new SplitError(`${cmd} needs the shared file`);
-  const sharedDoc = readDoc(shared, 'shared file');
-  if (!sharedDoc) throw new SplitError(`no shared file at ${shared}`);
-  const liveDoc = readDoc(config, 'live config') || split('');
+  const unlock = cmd === 'apply' && !args.dry ? lockConfig(config) : () => {};
+  try {
+    const sharedDoc = readDoc(shared, 'shared file');
+    if (!sharedDoc) throw new SplitError(`no shared file at ${shared}`);
+    const liveDoc = readDoc(config, 'live config') || split('');
 
-  if (cmd === 'check') {
-    const a = shareable(sharedDoc, keep);
-    const b = shareable(liveDoc, keep);
-    if (a.join('\n') === b.join('\n')) { console.log('in sync'); return 0; }
-    const sa = new Set(a), sb = new Set(b);
-    for (const x of b) if (!sa.has(x)) console.log(`- ${x}   (live only)`);
-    for (const x of a) if (!sb.has(x)) console.log(`+ ${x}   (shared only)`);
-    if ([...a].every((x) => sb.has(x)) && [...b].every((x) => sa.has(x))) console.log('(same lines, different order)');
-    return 1;
-  }
+    if (cmd === 'check') {
+      const a = shareable(sharedDoc, keep);
+      const b = shareable(liveDoc, keep);
+      if (a.join('\n') === b.join('\n')) { console.log('in sync'); return 0; }
+      const sa = new Set(a), sb = new Set(b);
+      for (const x of b) if (!sa.has(x)) console.log(`- ${x}   (live only)`);
+      for (const x of a) if (!sb.has(x)) console.log(`+ ${x}   (shared only)`);
+      if ([...a].every((x) => sb.has(x)) && [...b].every((x) => sa.has(x))) console.log('(same lines, different order)');
+      return 1;
+    }
 
-  let isLink = false;
-  try { isLink = fs.lstatSync(config).isSymbolicLink(); } catch {}
-  if (isLink && !args.dry) {
-    throw new SplitError(`${config} is a symlink, which apply does not write through. Replace the link with a plain file, then run apply.`);
-  }
-  // Codex may save a trust choice while this runs: merge from one read, and start again if the
-  // file changed before the rename (three tries).
-  let live = liveDoc;
-  for (let attempt = 1; ; attempt++) {
-    const eol = live.text !== undefined ? live.eol : sharedDoc.eol;
-    const m = merge(sharedDoc, live, keep);
-    const text = m.lines.join(eol) + eol;
-    split(text); // the result must split cleanly too
-    if (attempt === 1 && m.ignored) console.error(`ignored ${m.ignored} machine-local entr${m.ignored === 1 ? 'y' : 'ies'} in ${shared}`);
-    if (args.dry) { process.stdout.write(text); return 0; }
-    const before = live.text === undefined ? null : live.text;
-    const kept = `${m.kept} local entr${m.kept === 1 ? 'y' : 'ies'} kept`;
-    if (before === text) { console.log(`already in sync (${kept})`); return 0; }
-    fs.mkdirSync(path.dirname(config), { recursive: true });
-    const unchanged = () => {
-      let now = null;
-      try { now = fs.readFileSync(config, 'utf8'); } catch {}
-      return now === before;
-    };
-    const again = () => {
-      if (attempt === 3) throw new SplitError(`${config} kept changing while apply ran; nothing written, run apply again`);
-      live = readDoc(config, 'live config') || split('');
-    };
-    if (!unchanged()) { again(); continue; }
-    const mode = modeOf(config);
-    // The backup goes last of all: a refused try must leave the last good one.
-    const safe = () => {
-      if (!unchanged()) return false;
-      if (before !== null) replaceFile(config + '.bak', before, mode);
-      return true;
-    };
-    if (!replaceFile(config, text, mode, safe)) { again(); continue; }
-    console.log(`wrote ${config} (${kept}${before !== null ? `; the old file is ${config}.bak` : ''})`);
-    return 0;
-  }
+    let isLink = false;
+    try { isLink = fs.lstatSync(config).isSymbolicLink(); } catch {}
+    if (isLink && !args.dry) {
+      throw new SplitError(`${config} is a symlink, which apply does not write through. Replace the link with a plain file, then run apply.`);
+    }
+    // Codex may save a trust choice while this runs: merge from one read, and start again if the
+    // file changed before the rename (three tries).
+    let live = liveDoc;
+    for (let attempt = 1; ; attempt++) {
+      const eol = live.text !== undefined ? live.eol : sharedDoc.eol;
+      const m = merge(sharedDoc, live, keep);
+      const text = m.lines.join(eol) + eol;
+      split(text); // the result must split cleanly too
+      if (attempt === 1 && m.ignored) console.error(`ignored ${m.ignored} machine-local entr${m.ignored === 1 ? 'y' : 'ies'} in ${shared}`);
+      if (args.dry) { process.stdout.write(text); return 0; }
+      const before = live.text === undefined ? null : live.text;
+      const kept = `${m.kept} local entr${m.kept === 1 ? 'y' : 'ies'} kept`;
+      if (before === text) { console.log(`already in sync (${kept})`); return 0; }
+      const unchanged = () => {
+        let now = null;
+        try { now = fs.readFileSync(config, 'utf8'); } catch {}
+        return now === before;
+      };
+      const again = () => {
+        if (attempt === 3) throw new SplitError(`${config} kept changing while apply ran; nothing written, run apply again`);
+        live = readDoc(config, 'live config') || split('');
+      };
+      if (!unchanged()) { again(); continue; }
+      const mode = modeOf(config);
+      // The backup goes last of all: a refused try must leave the last good one.
+      const safe = () => {
+        if (!unchanged()) return false;
+        if (before !== null) replaceFile(config + '.bak', before, mode);
+        return true;
+      };
+      if (!replaceFile(config, text, mode, safe)) { again(); continue; }
+      console.log(`wrote ${config} (${kept}${before !== null ? `; the old file is ${config}.bak` : ''})`);
+      return 0;
+    }
+  } finally { unlock(); }
 }
 
 module.exports = { split, shareable, merge, SplitError };
