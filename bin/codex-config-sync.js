@@ -245,9 +245,21 @@ function linkTarget(file) {
   for (let n = 0; n < 40; n++) {
     let to;
     try { to = fs.readlinkSync(file); } catch { return file; }
-    file = path.resolve(path.dirname(file), to);
+    file = walkLink(path.dirname(file), to);
   }
   throw new SplitError(`${file}: too many links`);
+}
+
+// The path a link's text names, step by step as the system walks it: `..` after a linked folder
+// leaves that folder's real parent, which path.resolve would get wrong.
+function walkLink(dir, to) {
+  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return p; } };
+  let at = path.isAbsolute(to) ? path.parse(to).root : real(dir);
+  for (const part of to.split(path.sep)) {
+    if (!part || part === '.') continue;
+    at = part === '..' ? path.dirname(at) : real(path.join(at, part));
+  }
+  return at;
 }
 
 // Writes by rename, so a link at `file` is replaced, never followed, and the file has exactly

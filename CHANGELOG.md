@@ -9,6 +9,7 @@
 - `apply` reads the file once more just before the rename, so a trust choice saved while the backup was being
   written is kept.
 - `extract -o` keeps an existing output as `FILE.bak` and writes through a dangling link instead of replacing it.
+- `extract -o` through a linked folder lands where the system says: a link's `..` no longer sends the write to an unrelated file.
 - Two child tables of separate `[[array]]` elements are accepted. `x.y = 1` with a later `[x]` is refused.
 - A file that cannot be read exits 2, not 1, which `check` keeps for drift.
 - One multi-line dotted trust entry is counted once.
