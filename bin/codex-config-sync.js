@@ -166,7 +166,7 @@ function lockConfig(config) {
     holder = recoverLock(lock);
     if (n < 10) Atomics.wait(pause, 0, 0, 50);
   }
-  throw new SplitError(`${lock}: lock busy after waiting 500 ms; holder: ${holder}; nothing written`);
+  throw new SplitError(`${lock}: lock busy after waiting 500 ms; holder: ${holder}; nothing written. Check that no apply is still running on any host using this config. Only then remove ${lock} and run apply again.`);
 }
 
 function main(argv) {
@@ -202,6 +202,9 @@ function main(argv) {
   }
   if (cmd !== 'apply' && cmd !== 'check') throw new SplitError(`unknown command ${cmd}`);
   if (!shared) throw new SplitError(`${cmd} needs the shared file`);
+  // Refuse a missing shared file before creating the config folder or lock; contents
+  // are still read under the lock, since the shared file may be the live config.
+  if (!fs.statSync(shared, { throwIfNoEntry: false })) throw new SplitError(`no shared file at ${shared}`);
   const unlock = cmd === 'apply' && !args.dry ? lockConfig(config) : () => {};
   try {
     const sharedDoc = readDoc(shared, 'shared file');

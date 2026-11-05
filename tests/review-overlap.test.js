@@ -154,16 +154,24 @@ test('CMP a lock from a provably dead local pid is recovered without a manual st
   contains(fs.readFileSync(f.cfg, 'utf8'), MCP_NEW, PROFILE_OLD);
   noLock(f.cfg);
 });
-for (const owner of ['foreign', 'unknown']) {
+for (const owner of ['foreign', 'unknown', 'truncated', 'invalid']) {
   test(`BUG ${owner} ownership is refused, never guessed dead`, (d) => {
     const f = files(d);
     if (owner === 'foreign') putLock(f.cfg, deadPid(), os.hostname() + '-other');
-    else fs.writeFileSync(f.cfg + '.lock', '');
+    else fs.writeFileSync(f.cfg + '.lock', owner === 'truncated' ? '{"pid":' : owner === 'invalid' ? '{}' : '');
+    const lock = fs.readFileSync(f.cfg + '.lock', 'utf8');
     const r = run(f.mcp);
     assert.strictEqual(r.code, 2, r.err);
     assert.ok(r.err.includes(f.cfg + '.lock'), r.err);
     assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
     assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
+    assert.strictEqual(fs.readFileSync(f.cfg + '.lock', 'utf8'), lock);
+    assert.match(r.err, /check that no apply is still running on any host/i, 'refusal must explain what to check');
+    assert.ok(r.err.includes(`Only then remove ${f.cfg}.lock and run apply again`), 'refusal must name the safe recovery step');
+    // These fixture locks have no owner; follow the remedy and confirm retry heals.
+    fs.unlinkSync(f.cfg + '.lock');
+    success(run(f.mcp));
+    noLock(f.cfg);
   });
 }
 for (const stage of ['before-reap', 'during-reap']) {
@@ -276,6 +284,27 @@ test('BUG read-only config folder refuses even a no-op apply without leaving a l
     assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
     noLock(f.cfg);
   } finally { fs.chmodSync(d, 0o700); }
+});
+for (const sharedKind of ['missing', 'dangling']) {
+  test(`BUG ${sharedKind} shared file refuses apply without creating the config folder`, (d) => {
+    const cfg = path.join(d, 'new', 'nested', 'config.toml'), shared = path.join(d, 'shared.toml');
+    if (sharedKind === 'dangling') fs.symlinkSync(path.join(d, 'absent.toml'), shared);
+    const before = fs.readdirSync(d).sort();
+    const r = run(['apply', shared, '--config', cfg]);
+    assert.strictEqual(r.code, 2, r.err);
+    assert.ok(r.err.includes(`no shared file at ${shared}`), r.err);
+    assert.deepStrictEqual(fs.readdirSync(d).sort(), before, 'refused apply must not create the config folder');
+  });
+}
+test('BUG missing shared file refuses before locking an existing config folder', (d) => {
+  const f = files(d), shared = path.join(d, 'missing.toml');
+  const r = run(['apply', shared, '--config', f.cfg],
+    { LOCK_CONFIG: f.cfg, LOCK_STAGE: 'no-lock' }, ['-r', LOCK_PRELOAD]);
+  assert.strictEqual(r.code, 2, r.err);
+  assert.ok(r.err.includes(`no shared file at ${shared}`), r.err);
+  assert.strictEqual(fs.readFileSync(f.cfg, 'utf8'), LIVE);
+  assert.strictEqual(fs.readFileSync(f.cfg + '.bak', 'utf8'), 'model = "previous"\n');
+  noLock(f.cfg);
 });
 test('CMP a missing config folder is created before locking and the lock is removed', (d) => {
   const f = files(d), cfg = path.join(d, 'new', 'nested', 'config.toml');

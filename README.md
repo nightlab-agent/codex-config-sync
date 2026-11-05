@@ -68,8 +68,9 @@ The written file is, in order: the shared file's settings above its first table,
 entries written as dotted keys above the first table (such as `projects."/x".trust_level = ...`), the
 shared tables, then this machine's trust tables.
 
-Before reading, `apply` exclusively creates `config.toml.lock` beside the live config and holds it through
-the merge, backup and rename. Another apply waits in 50 ms steps (500 ms total), then refuses with exit 2
+After checking that the shared file exists, `apply` exclusively creates `config.toml.lock` beside the live
+config before reading either file's contents and holds it through the merge, backup and rename.
+Another apply waits in 50 ms steps (500 ms total), then refuses with exit 2
 naming the lock file and its holder's PID and hostname; it leaves the config and backup alone. Every normal
 exit removes the run's own lock, including when already in sync or refusing a malformed config. `--dry-run`,
 `extract` and `check` take no lock.
@@ -79,6 +80,9 @@ links to avoid removing a new owner's lock. A live PID is never taken over, even
 foreign hosts and incomplete lock records are refused. This needs a filesystem that honors exclusive create,
 and recovery needs reliable hard links and inode/link counts. Network home folders are untested; automatic
 recovery assumes unique hostnames and a shared local PID namespace.
+The refusal tells you how to recover manually: check that no apply is still running on any host using
+this config. Only then remove the named lock file and run `apply` again. An incomplete record may be
+left by an interrupted lock write; waiting alone will not repair it.
 
 If Codex saves a trust choice while `apply` runs, `apply`
 reads the file again and starts over (three tries), so the new table is kept. The last check runs just before
