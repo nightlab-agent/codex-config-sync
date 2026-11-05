@@ -11,6 +11,7 @@
   written is kept.
 - `extract -o` keeps an existing output as `FILE.bak` and writes through a dangling link instead of replacing it.
 - `extract -o` through a linked folder lands where the system says: a link's `..` no longer sends the write to an unrelated file.
+- A link whose path goes through something that is not a folder (a dangling link, a plain file) is refused with exit 2, as the system refuses it.
 - Two child tables of separate `[[array]]` elements are accepted. `x.y = 1` with a later `[x]` is refused.
 - A file that cannot be read exits 2, not 1, which `check` keeps for drift.
 - One multi-line dotted trust entry is counted once.

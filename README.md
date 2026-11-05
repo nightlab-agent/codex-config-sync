@@ -74,7 +74,8 @@ the rename, so only a save inside that last instant can still be lost; Codex has
 
 - It does not copy files between machines. Use git, your dotfiles manager, or a synced folder for the shared file.
 - It does not touch `auth.json`, sessions or history. It writes only `config.toml`, `config.toml.bak`, the
-  file you name with `-o` and that file's `.bak` copy when it already existed. A run killed mid-write can leave a
+  file you name with `-o` and that file's `.bak` copy when it already existed (when that file is a link, the
+  write and the `.bak` land beside the file it points to). A run killed mid-write can leave a
   `.config.toml.<pid>.tmp` beside the file; it is safe to delete.
 - Trust tables inside the shared file are ignored (it says how many). Trust stays per machine.
 - It refuses, and writes nothing, when a file has a string or bracket it cannot follow, when the result would

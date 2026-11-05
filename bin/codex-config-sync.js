@@ -257,6 +257,7 @@ function walkLink(dir, to) {
   let at = path.isAbsolute(to) ? path.parse(to).root : real(dir);
   for (const part of to.split(path.sep)) {
     if (!part || part === '.') continue;
+    if (!fs.statSync(at, { throwIfNoEntry: false })?.isDirectory()) throw new SplitError(`${to}: ${at} is not a folder`);
     at = part === '..' ? path.dirname(at) : real(path.join(at, part));
   }
   return at;

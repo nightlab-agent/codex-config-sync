@@ -8,6 +8,7 @@ node tests/review.test.js
 node tests/review-second.test.js
 node tests/review-release.test.js
 node tests/review-ts.test.js
+node tests/review-gate.test.js
 cmp preview/laptop-before.toml preview/project/laptop/config.toml || { echo "preview/project/laptop/config.toml was changed: restore it"; exit 1; }
 v=$(node -p "require('./package.json').version")
 [ "$(node bin/codex-config-sync.js --version)" = "$v" ] || { echo "--version differs from $v"; exit 1; }
