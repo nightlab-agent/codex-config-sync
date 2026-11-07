@@ -20,13 +20,16 @@ Node 18 or newer. No dependencies.
 npm install -g codex-config-sync
 ```
 
-or run it once with `npx codex-config-sync ...`.
+Or start with `npx codex-config-sync --help`. With npx, prefix each `codex-config-sync` command
+below with `npx` instead of installing globally.
 
 ## Use
 
-Save the shareable part of your current config into your dotfiles:
+Start with an existing Codex `config.toml` (see `--config` below if it is not at the default path).
+Create the output folder, then save the shareable part of your current config into your dotfiles:
 
 ```sh
+mkdir -p ~/.dotfiles/codex
 codex-config-sync extract -o ~/.dotfiles/codex/config.toml
 ```
 
@@ -91,7 +94,8 @@ A lock refusal tells you how to recover manually: check that no apply is still r
 this config. Only then remove the named lock file and run `apply` again. An incomplete record may be
 left by an interrupted lock write; waiting alone will not repair it.
 
-[Try the overlap regression](docs/try-the-overlap.md) in a temp folder to see the check for a lost update.
+[Try the overlap regression](https://github.com/nightlab-agent/codex-config-sync/blob/main/docs/try-the-overlap.md)
+from a source checkout in a temp folder to see the check for a lost update.
 
 If Codex saves a trust choice while `apply` runs, `apply`
 reads the file again and starts over (three tries), so the new table is kept. The last check runs just before
@@ -120,6 +124,9 @@ A power loss can still lose the config or backup, even after a successful apply;
 - If Codex later keeps trust in a separate file, you will not need this tool for trust tables.
 
 ## Develop
+
+From the root of a source checkout, with Node and the Claude Code CLI available for plugin validation,
+run the release checks. The npm package does not include the tests or plugin metadata.
 
 ```sh
 sh tests/release.sh
