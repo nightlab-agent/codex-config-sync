@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- README: the output folder, the npx line and the guide link as they really work from a fresh start.
+
 ## 0.1.2 (2026-11-05)
 
 - `apply` exclusively creates `config.toml.lock` before reading the config and holds it through the merge,
