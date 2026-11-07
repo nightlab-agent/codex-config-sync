@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 - 2026-11-07
 
 - README: the output folder, the npx line and the guide link as they really work from a fresh start.
 
